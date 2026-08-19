@@ -1,0 +1,212 @@
+import asyncio
+import logging
+from datetime import datetime
+
+import aiosqlite
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.enums import ChatMemberStatus, ParseMode
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    WebAppInfo,
+)
+
+# --- КОНФИГУРАЦИЯ ---
+BOT_TOKEN = "АААААААААААА"
+CHANNEL_USERNAME = "@WallRushHack"
+LOG_GROUP_ID = "АААААААААА"
+
+# Ссылка на Mini App
+WEB_APP_URL = "https://dimaserezhkin14-hash.github.io/wallhackbot/"
+
+DB_PATH = "bot_users.db"
+
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+
+# --- РАБОТА С БАЗОЙ ДАННЫХ (Несгораемая статистика) ---
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                last_name TEXT,
+                joined_at TEXT
+            )
+            """
+        )
+        await db.commit()
+
+
+async def register_user(user: types.User) -> tuple[bool, int]:
+    """Регистрирует пользователя и возвращает (новый_ли_юзер, общее_кол-во)."""
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT user_id FROM users WHERE user_id = ?", (user.id,)
+        )
+        exists = await cursor.fetchone()
+
+        is_new = False
+        if not exists:
+            await db.execute(
+                """
+                INSERT INTO users (user_id, username, first_name, last_name, joined_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (user.id, user.username, user.first_name, user.last_name, now),
+            )
+            await db.commit()
+            is_new = True
+
+        cursor = await db.execute("SELECT COUNT(*) FROM users")
+        total_count = (await cursor.fetchone())[0]
+
+        return is_new, total_count
+
+
+# --- ПРОВЕРКА ПОДПИСКИ ---
+async def check_subscription(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(
+            chat_id=CHANNEL_USERNAME, user_id=user_id
+        )
+        return member.status in [
+            ChatMemberStatus.MEMBER,
+            ChatMemberStatus.ADMINISTRATOR,
+            ChatMemberStatus.CREATOR,
+        ]
+    except Exception as e:
+        logging.error(f"Ошибка проверки подписки: {e}")
+        return False
+
+
+# --- КЛАВИАТУРЫ ---
+def get_sub_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="📢 Подписаться на канал",
+                    url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🔄 Проверить подписку",
+                    callback_data="check_sub",
+                )
+            ],
+        ]
+    )
+
+
+def get_app_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🚀 Открыть WallHack",
+                    web_app=WebAppInfo(url=WEB_APP_URL),
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📢 Наш канал",
+                    url=f"https://t.me/{CHANNEL_USERNAME.lstrip('@')}",
+                )
+            ],
+        ]
+    )
+
+
+# --- ЛОГИРОВАНИЕ В ГРУППУ ---
+async def log_user(user: types.User, is_new: bool, total_users: int):
+    status_text = (
+        "🆕 <b>Новый пользователь!</b>"
+        if is_new
+        else "🔄 <b>Пользователь вернулся</b>"
+    )
+    username_str = (
+        f"@{user.username}" if user.username else "<i>нет юзернейма</i>"
+    )
+
+    log_msg = (
+        f"{status_text}\n\n"
+        f"👤 <b>Имя:</b> {user.full_name}\n"
+        f"🔗 <b>Юзернейм:</b> {username_str}\n"
+        f"🆔 <b>ID:</b> <code>{user.id}</code>\n"
+        f"📊 <b>Всего пользователей за всё время:</b> <b>{total_users}</b>"
+    )
+    try:
+        await bot.send_message(
+            chat_id=LOG_GROUP_ID,
+            text=log_msg,
+            parse_mode=ParseMode.HTML,
+        )
+    except Exception as e:
+        logging.error(f"Ошибка отправки лога в группу: {e}")
+
+
+# --- ОБРАБОТЧИКИ КОМАНД ---
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message):
+    user = message.from_user
+    is_new, total_users = await register_user(user)
+
+    # Отправляем лог в группу
+    await log_user(user, is_new, total_users)
+
+    # Проверка подписки
+    is_sub = await check_subscription(user.id)
+
+    if not is_sub:
+        await message.answer(
+            f"👋 Привет, <b>{user.first_name}</b>!\n\n"
+            f"⚠️ Для доступа к Mini App с читом необходимо подписаться на наш новостной канал {CHANNEL_USERNAME}.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_sub_keyboard(),
+        )
+    else:
+        await message.answer(
+            f"👋 Привет, <b>{user.first_name}</b>!\n\n"
+            f"🔥 Твой чит-помощник готов к работе.\n"
+            f"Нажми на кнопку ниже, чтобы запустить приложение:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_app_keyboard(),
+        )
+
+
+@dp.callback_query(F.data == "check_sub")
+async def cb_check_sub(call: types.CallbackQuery):
+    user = call.from_user
+    is_sub = await check_subscription(user.id)
+
+    if is_sub:
+        await call.message.delete()
+        await call.message.answer(
+            f"✅ <b>Подписка подтверждена!</b>\n\n"
+            f"🔥 Запускай Mini App по кнопке ниже:",
+            parse_mode=ParseMode.HTML,
+            reply_markup=get_app_keyboard(),
+        )
+    else:
+        await call.answer("❌ Ты ещё не подписался на канал!", show_alert=True)
+
+
+# --- ЗАПУСК ---
+async def main():
+    await init_db()
+    logging.info("База данных готова. Бот запускается...")
+    await bot.delete_webhook(drop_pending_updates=True)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
