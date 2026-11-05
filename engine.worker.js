@@ -1,12 +1,13 @@
 "use strict";
 
 // ============================================================================
-// WALLHACK GRANDMASTER ENGINE WORKER (DUEL 9x9 + RACE 9x13)
-// Zero-string allocation inside search, Zobrist TT, Goal-Distance Cache, PVS
+// WALLHACK GRANDMASTER ENGINE WORKER (DUEL 9x9 + RACE 9x13 + QUAD 11x11)
 // ============================================================================
 
 let boardRows = 9;
+let boardCols = 9;
 let isRaceMode = false;
+let isQuadMode = false;
 let deadline = 0;
 let timedOut = false;
 let nodes = 0;
@@ -14,27 +15,24 @@ let ttHits = 0;
 let cutoffs = 0;
 let completedDepth = 0;
 
-// Плоские массивы стен (индекс: r * 8 + c, где r: 0..11, c: 0..7)
-const hWalls = new Uint8Array(128);
-const vWalls = new Uint8Array(128);
+// Для 9x9 и 9x13 (индекс r * 8 + c), для 11x11 (индекс r * 10 + c)
+const hWalls = new Uint8Array(160);
+const vWalls = new Uint8Array(160);
 
-// Текущее состояние в поиске
 let myR = 8, myC = 4, oppR = 0, oppC = 4;
 let myWalls = 10, oppWalls = 10;
 let totalWallsPlaced = 0;
 
-// 64-битный Zobrist-хеш стенок (два 32-битных беззнаковых числа)
 let wHashLo = 0, wHashHi = 0;
 
-// Генерация таблиц Zobrist
-const Z_HWALL_LO = new Uint32Array(128);
-const Z_HWALL_HI = new Uint32Array(128);
-const Z_VWALL_LO = new Uint32Array(128);
-const Z_VWALL_HI = new Uint32Array(128);
-const Z_ME_LO = new Uint32Array(128);
-const Z_ME_HI = new Uint32Array(128);
-const Z_OPP_LO = new Uint32Array(128);
-const Z_OPP_HI = new Uint32Array(128);
+const Z_HWALL_LO = new Uint32Array(160);
+const Z_HWALL_HI = new Uint32Array(160);
+const Z_VWALL_LO = new Uint32Array(160);
+const Z_VWALL_HI = new Uint32Array(160);
+const Z_ME_LO = new Uint32Array(160);
+const Z_ME_HI = new Uint32Array(160);
+const Z_OPP_LO = new Uint32Array(160);
+const Z_OPP_HI = new Uint32Array(160);
 const Z_MW_LO = new Uint32Array(20);
 const Z_MW_HI = new Uint32Array(20);
 const Z_OW_LO = new Uint32Array(20);
@@ -49,7 +47,7 @@ const Z_OW_HI = new Uint32Array(20);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return (t ^ (t >>> 14)) >>> 0;
   }
-  for (let i = 0; i < 128; i++) {
+  for (let i = 0; i < 160; i++) {
     Z_HWALL_LO[i] = rand32(); Z_HWALL_HI[i] = rand32();
     Z_VWALL_LO[i] = rand32(); Z_VWALL_HI[i] = rand32();
     Z_ME_LO[i] = rand32();    Z_ME_HI[i] = rand32();
@@ -64,33 +62,39 @@ const Z_OW_HI = new Uint32Array(20);
 const TT = new Map();
 const wallDistCache = new Map();
 const killer = Array.from({ length: 32 }, () => [0, 0]);
-const history = new Int32Array(1024);
-
-const bfsQ = new Int16Array(160);
+const history = new Int32Array(2048);
+const bfsQ = new Int16Array(200);
 
 function now() {
   return typeof performance !== "undefined" ? performance.now() : Date.now();
 }
 
-// Быстрые проверки прохода между соседними клетками (без создания объектов и строк)
+function wStride() {
+  return boardCols - 1;
+}
+
 function canUp(r, c) {
   if (r <= 0) return false;
-  const base = (r - 1) << 3;
-  return (c >= 8 || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
+  const maxW = boardCols - 1;
+  const base = (r - 1) * maxW;
+  return (c >= maxW || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
 }
 function canDown(r, c) {
   if (r >= boardRows - 1) return false;
-  const base = r << 3;
-  return (c >= 8 || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
+  const maxW = boardCols - 1;
+  const base = r * maxW;
+  return (c >= maxW || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
 }
 function canLeft(r, c) {
   if (c <= 0) return false;
+  const maxW = boardCols - 1;
   const col = c - 1;
-  return (r >= boardRows - 1 || vWalls[(r << 3) + col] === 0) && (r <= 0 || vWalls[((r - 1) << 3) + col] === 0);
+  return (r >= boardRows - 1 || vWalls[r * maxW + col] === 0) && (r <= 0 || vWalls[(r - 1) * maxW + col] === 0);
 }
 function canRight(r, c) {
-  if (c >= 8) return false;
-  return (r >= boardRows - 1 || vWalls[(r << 3) + c] === 0) && (r <= 0 || vWalls[((r - 1) << 3) + c] === 0);
+  const maxW = boardCols - 1;
+  if (c >= maxW) return false;
+  return (r >= boardRows - 1 || vWalls[r * maxW + c] === 0) && (r <= 0 || vWalls[(r - 1) * maxW + c] === 0);
 }
 
 function canStepDir(r, c, dir) {
@@ -100,7 +104,462 @@ function canStepDir(r, c, dir) {
   return canRight(r, c);
 }
 
-// Обратный мульти-BFS от целевого ряда: за 1 проход строит карту расстояний для ВСЕХ клеток доски
+function wallGeometryLegal(r, c, o) {
+  const maxR = boardRows - 2;
+  const maxC = boardCols - 2;
+  if (r < 0 || r > maxR || c < 0 || c > maxC) return false;
+  const stride = boardCols - 1;
+  const idx = r * stride + c;
+  if (o === 0) {
+    if (hWalls[idx] || vWalls[idx]) return false;
+    if ((c > 0 && hWalls[idx - 1]) || (c < maxC && hWalls[idx + 1])) return false;
+    return true;
+  } else {
+    if (vWalls[idx] || hWalls[idx]) return false;
+    if ((r > 0 && vWalls[idx - stride]) || (r < maxR && vWalls[idx + stride])) return false;
+    return true;
+  }
+}
+
+function placeWallFast(r, c, o) {
+  const idx = r * (boardCols - 1) + c;
+  if (o === 0) {
+    hWalls[idx] = 1;
+    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
+    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
+  } else {
+    vWalls[idx] = 1;
+    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
+    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
+  }
+  totalWallsPlaced++;
+}
+
+function removeWallFast(r, c, o) {
+  const idx = r * (boardCols - 1) + c;
+  if (o === 0) {
+    hWalls[idx] = 0;
+    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
+    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
+  } else {
+    vWalls[idx] = 0;
+    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
+    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
+  }
+  totalWallsPlaced--;
+}
+
+// ============================================================================
+// МОДУЛЬ 3: QUAD ENGINE 11x11 (4 ИГРОКА — ВСЕ БЕГУТ К ЦЕНТРУ 5,5)
+// ============================================================================
+let quadPlayers = []; // [{r, c, walls, active, turnLag}, ...] index 0 = me
+
+function computeCenterMap11() {
+  const key = "Q:" + wHashLo + ":" + wHashHi;
+  let dist = wallDistCache.get(key);
+  if (dist !== undefined) return dist;
+
+  dist = new Int8Array(121);
+  dist.fill(-1);
+  let head = 0, tail = 0;
+  const centerIdx = 5 * 11 + 5;
+  dist[centerIdx] = 0;
+  bfsQ[tail++] = centerIdx;
+
+  while (head < tail) {
+    const idx = bfsQ[head++];
+    const r = (idx / 11) | 0;
+    const c = idx - r * 11;
+    const nd = dist[idx] + 1;
+
+    if (canUp(r, c)) {
+      const ni = idx - 11;
+      if (dist[ni] === -1) { dist[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canDown(r, c)) {
+      const ni = idx + 11;
+      if (dist[ni] === -1) { dist[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canLeft(r, c)) {
+      const ni = idx - 1;
+      if (dist[ni] === -1) { dist[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canRight(r, c)) {
+      const ni = idx + 1;
+      if (dist[ni] === -1) { dist[ni] = nd; bfsQ[tail++] = ni; }
+    }
+  }
+  if (wallDistCache.size > 50000) wallDistCache.clear();
+  wallDistCache.set(key, dist);
+  return dist;
+}
+
+function countExits11(r, c, dist) {
+  const idx = r * 11 + c;
+  const d = dist[idx];
+  if (d <= 0) return 0;
+  const target = d - 1;
+  let ex = 0;
+  if (canUp(r, c) && dist[idx - 11] === target) ex++;
+  if (canDown(r, c) && dist[idx + 11] === target) ex++;
+  if (canLeft(r, c) && dist[idx - 1] === target) ex++;
+  if (canRight(r, c) && dist[idx + 1] === target) ex++;
+  return ex;
+}
+
+const DR = [-1, 1, 0, 0];
+const DC = [0, 0, -1, 1];
+
+function isCellOccupiedQuad(r, c, ignoreIdx) {
+  for (let i = 0; i < quadPlayers.length; i++) {
+    if (i !== ignoreIdx && quadPlayers[i].active && quadPlayers[i].r === r && quadPlayers[i].c === c) return true;
+  }
+  return false;
+}
+
+function getQuadSteps(pIdx) {
+  const p = quadPlayers[pIdx];
+  const out = [];
+  for (let d = 0; d < 4; d++) {
+    if (!canStepDir(p.r, p.c, d)) continue;
+    const nr = p.r + DR[d], nc = p.c + DC[d];
+    if (isCellOccupiedQuad(nr, nc, pIdx)) {
+      const jr = nr + DR[d], jc = nc + DC[d];
+      if (jr >= 0 && jr < 11 && jc >= 0 && jc < 11 && canStepDir(nr, nc, d) && !isCellOccupiedQuad(jr, jc, pIdx)) {
+        out.push({ r: jr, c: jc });
+      } else {
+        if (d < 2) {
+          if (canLeft(nr, nc) && !isCellOccupiedQuad(nr, nc - 1, pIdx)) out.push({ r: nr, c: nc - 1 });
+          if (canRight(nr, nc) && !isCellOccupiedQuad(nr, nc + 1, pIdx)) out.push({ r: nr, c: nc + 1 });
+        } else {
+          if (canUp(nr, nc) && !isCellOccupiedQuad(nr - 1, nc, pIdx)) out.push({ r: nr - 1, c: nc });
+          if (canDown(nr, nc) && !isCellOccupiedQuad(nr + 1, nc, pIdx)) out.push({ r: nr + 1, c: nc });
+        }
+      }
+    } else {
+      out.push({ r: nr, c: nc });
+    }
+  }
+  return out;
+}
+
+function evaluateQuadState(myTurnNow) {
+  const me = quadPlayers[0];
+  if (me.r === 5 && me.c === 5) return 100000000;
+
+  const dist = computeCenterMap11();
+  const myD = dist[me.r * 11 + me.c];
+  if (myD < 0) return -100000000;
+
+  let minOppEffDist = 999;
+  let secondOppEffDist = 999;
+  let leaderIdx = 1;
+
+  for (let i = 1; i < quadPlayers.length; i++) {
+    const op = quadPlayers[i];
+    if (!op.active) continue;
+    if (op.r === 5 && op.c === 5) return -100000000;
+    const od = dist[op.r * 11 + op.c];
+    if (od < 0) return 100000000;
+
+    // Учет очереди хода по часовой стрелке: если сейчас ход врага, он на 0.65 шага ближе
+    const turnAdvantage = myTurnNow ? (0.15 * i) : (-0.65 + 0.15 * i);
+    const eff = od + turnAdvantage;
+    if (eff < minOppEffDist) {
+      secondOppEffDist = minOppEffDist;
+      minOppEffDist = eff;
+      leaderIdx = i;
+    } else if (eff < secondOppEffDist) {
+      secondOppEffDist = eff;
+    }
+  }
+
+  const myExits = countExits11(me.r, me.c, dist);
+  const leader = quadPlayers[leaderIdx];
+  const leaderExits = leader && leader.active ? countExits11(leader.r, leader.c, dist) : 2;
+
+  // Главный критерий — наш отрыв от САМОГО ОПАСНОГО соперника (лидера гонки к центру)
+  let score = (minOppEffDist - myD) * 2000;
+  // Дополнительный учет второго по опасности врага
+  if (secondOppEffDist < 900) {
+    score += (secondOppEffDist - myD) * 450;
+  }
+
+  // Экономия 7 стенок: в режиме 4 игроков нельзя сливать стены зря
+  score += me.walls * 160;
+  if (me.walls === 0 && minOppEffDist <= myD) score -= 1800;
+
+  // Ширина нашего подхода к золотой клетке против ширины подхода лидера
+  score += (myExits - leaderExits) * 190;
+
+  // Контроль «Золотой коробочки» вокруг (5,5): выгодно, когда вход снизу (canDown(5,5)) открыт для нас!
+  if (canDown(5, 5) && me.r > 5) score += 280;
+
+  return score;
+}
+
+function generateQuadMoves(pIdx, isRoot) {
+  const p = quadPlayers[pIdx];
+  const dist = computeCenterMap11();
+  const curD = dist[p.r * 11 + p.c];
+  const moves = [];
+
+  // 1. Шаги пешкой
+  const steps = getQuadSteps(pIdx);
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    if (st.r === 5 && st.c === 5) {
+      return [{ type: 0, r: st.r, c: st.c, o: 0, prio: 1e12 }];
+    }
+    const nd = dist[st.r * 11 + st.c];
+    const gain = curD - nd;
+    let prio = gain * 9500;
+    if (gain >= 2) prio += 5000; // Прыжок через чужую пешку к центру
+    moves.push({ type: 0, r: st.r, c: st.c, o: 0, prio });
+  }
+
+  if (p.walls <= 0) {
+    return moves.sort((a, b) => b.prio - a.prio);
+  }
+
+  // Определяем текущую цель для блокировки (для нас — лидер среди врагов; для врагов — лидер среди всех)
+  let targetIdx = 0;
+  let bestTargetDist = 999;
+  for (let i = 0; i < quadPlayers.length; i++) {
+    if (i === pIdx || !quadPlayers[i].active) continue;
+    const d = dist[quadPlayers[i].r * 11 + quadPlayers[i].c];
+    if (d < bestTargetDist) {
+      bestTargetDist = d;
+      targetIdx = i;
+    }
+  }
+
+  // Если мы и так опережаем ближайшего соперника на 2+ чистых шага, не тратим стены внутри дерева
+  if (!isRoot && pIdx === 0 && curD + 1 < bestTargetDist) {
+    return moves.sort((a, b) => b.prio - a.prio);
+  }
+
+  const target = quadPlayers[targetIdx];
+  const wallCands = [];
+
+  for (let r = 0; r <= 9; r++) {
+    for (let c = 0; c <= 9; c++) {
+      const nearCenter = Math.abs(r - 4.5) <= 2 && Math.abs(c - 4.5) <= 2;
+      const nearTarget = Math.abs(r - target.r) <= 2 && Math.abs(c - target.c) <= 2;
+      if (!nearCenter && !nearTarget) continue;
+
+      for (let o = 0; o < 2; o++) {
+        if (!wallGeometryLegal(r, c, o)) continue;
+
+        placeWallFast(r, c, o);
+        const newDist = computeCenterMap11();
+        let legal = true;
+        for (let i = 0; i < quadPlayers.length; i++) {
+          if (quadPlayers[i].active && newDist[quadPlayers[i].r * 11 + quadPlayers[i].c] < 0) {
+            legal = false;
+            break;
+          }
+        }
+        const newMyD = newDist[p.r * 11 + p.c];
+        const newTargetD = newDist[target.r * 11 + target.c];
+        removeWallFast(r, c, o);
+
+        if (!legal) continue;
+
+        const targetDelay = newTargetD - bestTargetDist;
+        const selfLoss = newMyD - curD;
+        const net = targetDelay - selfLoss;
+
+        if (net <= 0 && !nearCenter) continue;
+        if (selfLoss > 0 && targetDelay <= selfLoss) continue;
+
+        let prio = net * 6800 + targetDelay * 2400;
+        if (nearCenter && targetDelay >= 1 && selfLoss === 0) prio += 3200; // Золотая коробочка у (5,5)
+        wallCands.push({ type: 1, r, c, o, prio });
+      }
+    }
+  }
+
+  wallCands.sort((a, b) => b.prio - a.prio);
+  const limit = isRoot ? 24 : 10;
+  for (let i = 0; i < Math.min(limit, wallCands.length); i++) {
+    moves.push(wallCands[i]);
+  }
+  return moves.sort((a, b) => b.prio - a.prio);
+}
+
+// Симуляция ответа всех активных противников по кругу до нашего следующего хода
+function simulateOpponentsRound(depth, alpha, beta) {
+  // Находим самого опасного активного соперника и просчитываем его лучший контрход,
+  // а для остальных активных делаем их быстрейший шаг к центру (5,5)
+  const dist = computeCenterMap11();
+  let leaderIdx = -1;
+  let minD = 999;
+  for (let i = 1; i < quadPlayers.length; i++) {
+    if (!quadPlayers[i].active) continue;
+    const d = dist[quadPlayers[i].r * 11 + quadPlayers[i].c];
+    if (d < minD) { minD = d; leaderIdx = i; }
+  }
+  if (leaderIdx === -1) return evaluateQuadState(true);
+
+  // Сохраняем позиции второстепенных соперников и двигаем их на 1 оптимальный шаг к (5,5)
+  const savedPos = [];
+  for (let i = 1; i < quadPlayers.length; i++) {
+    const op = quadPlayers[i];
+    savedPos.push({ r: op.r, c: op.c });
+    if (!op.active || i === leaderIdx) continue;
+    const st = getQuadSteps(i);
+    let bestR = op.r, bestC = op.c, bestD = dist[op.r * 11 + op.c];
+    for (let k = 0; k < st.length; k++) {
+      const nd = dist[st[k].r * 11 + st[k].c];
+      if (nd >= 0 && nd < bestD) { bestD = nd; bestR = st[k].r; bestC = st[k].c; }
+    }
+    op.r = bestR; op.c = bestC;
+  }
+
+  // Полный минимакс-перебор за главного соперника (leaderIdx)
+  const leaderMoves = generateQuadMoves(leaderIdx, false);
+  const leader = quadPlayers[leaderIdx];
+  let worstForMe = Infinity;
+
+  for (let i = 0; i < Math.min(leaderMoves.length, 10); i++) {
+    const m = leaderMoves[i];
+    const sr = leader.r, sc = leader.c;
+    if (m.type === 0) {
+      leader.r = m.r; leader.c = m.c;
+    } else {
+      placeWallFast(m.r, m.c, m.o);
+      leader.walls--;
+    }
+
+    const val = quadSearchMe(depth - 1, alpha, worstForMe);
+
+    if (m.type === 0) {
+      leader.r = sr; leader.c = sc;
+    } else {
+      removeWallFast(m.r, m.c, m.o);
+      leader.walls++;
+    }
+
+    if (timedOut) break;
+    if (val < worstForMe) worstForMe = val;
+    if (worstForMe <= alpha) { cutoffs++; break; }
+  }
+
+  // Откатываем второстепенных соперников
+  for (let i = 1; i < quadPlayers.length; i++) {
+    quadPlayers[i].r = savedPos[i - 1].r;
+    quadPlayers[i].c = savedPos[i - 1].c;
+  }
+
+  return worstForMe;
+}
+
+function quadSearchMe(depth, alpha, beta) {
+  if ((++nodes & 63) === 0 && now() >= deadline) {
+    timedOut = true;
+    return 0;
+  }
+  if (quadPlayers[0].r === 5 && quadPlayers[0].c === 5) return 100000000 + depth;
+  for (let i = 1; i < quadPlayers.length; i++) {
+    if (quadPlayers[i].active && quadPlayers[i].r === 5 && quadPlayers[i].c === 5) return -100000000 - depth;
+  }
+  if (depth <= 0) return evaluateQuadState(true);
+
+  const myMoves = generateQuadMoves(0, false);
+  if (!myMoves.length) return evaluateQuadState(true);
+
+  let best = -Infinity;
+  const me = quadPlayers[0];
+
+  for (let i = 0; i < Math.min(myMoves.length, 14); i++) {
+    const m = myMoves[i];
+    const sr = me.r, sc = me.c;
+    if (m.type === 0) {
+      me.r = m.r; me.c = m.c;
+    } else {
+      placeWallFast(m.r, m.c, m.o);
+      me.walls--;
+    }
+
+    const val = (me.r === 5 && me.c === 5)
+      ? (100000000 + depth)
+      : simulateOpponentsRound(depth - 1, Math.max(alpha, best), beta);
+
+    if (m.type === 0) {
+      me.r = sr; me.c = sc;
+    } else {
+      removeWallFast(m.r, m.c, m.o);
+      me.walls++;
+    }
+
+    if (timedOut) return 0;
+    if (val > best) best = val;
+    if (best >= beta) { cutoffs++; break; }
+  }
+  return best;
+}
+
+function searchBestQuadMove(timeBudgetMs) {
+  nodes = 0; ttHits = 0; cutoffs = 0; timedOut = false; completedDepth = 0;
+  deadline = now() + timeBudgetMs;
+
+  const rootMoves = generateQuadMoves(0, true);
+  if (!rootMoves.length) return null;
+  if (rootMoves[0].type === 0 && rootMoves[0].r === 5 && rootMoves[0].c === 5) {
+    completedDepth = 1;
+    return rootMoves[0];
+  }
+
+  let bestMove = rootMoves[0];
+  const me = quadPlayers[0];
+
+  for (let depth = 1; depth <= 6; depth++) {
+    if (now() >= deadline) break;
+    timedOut = false;
+    let iterBest = bestMove;
+    let iterScore = -Infinity;
+
+    for (let i = 0; i < rootMoves.length; i++) {
+      const m = rootMoves[i];
+      const sr = me.r, sc = me.c;
+      if (m.type === 0) {
+        me.r = m.r; me.c = m.c;
+      } else {
+        placeWallFast(m.r, m.c, m.o);
+        me.walls--;
+      }
+
+      const score = simulateOpponentsRound(depth - 1, iterScore, Infinity);
+
+      if (m.type === 0) {
+        me.r = sr; me.c = sc;
+      } else {
+        removeWallFast(m.r, m.c, m.o);
+        me.walls++;
+      }
+
+      if (timedOut) break;
+      if (score > iterScore) {
+        iterScore = score;
+        iterBest = m;
+      }
+    }
+
+    if (!timedOut) {
+      bestMove = iterBest;
+      completedDepth = depth;
+      if (iterScore >= 90000000) break;
+    } else {
+      break;
+    }
+  }
+  return bestMove;
+}
+
+// ============================================================================
+// МОДУЛИ 1 И 2: ДУЭЛЬ 9x9 И ГОНКА 9x13
+// ============================================================================
 function computeGoalMap(goalRow) {
   const total = boardRows * 9;
   const dist = new Int8Array(total);
@@ -138,14 +597,12 @@ function computeGoalMap(goalRow) {
   return dist;
 }
 
-// Получение кэшированных карт расстояний для текущей конфигурации стен
 function getDistMaps() {
   const key = wHashLo + ":" + wHashHi;
   let entry = wallDistCache.get(key);
   if (entry !== undefined) return entry;
 
-  const meMap = computeGoalMap(0); // Мы всегда идем к r = 0
-  // В гонке 9x13 противник тоже бежит к r = 0, поэтому карта идентична!
+  const meMap = computeGoalMap(0);
   const oppMap = isRaceMode ? meMap : computeGoalMap(boardRows - 1);
 
   entry = { meMap, oppMap };
@@ -154,7 +611,6 @@ function getDistMaps() {
   return entry;
 }
 
-// Считает число оптимальных выходов (шагов, уменьшающих дистанцию) из клетки (r, c)
 function countOptimalExits(r, c, distMap) {
   const idx = r * 9 + c;
   const d = distMap[idx];
@@ -168,69 +624,19 @@ function countOptimalExits(r, c, distMap) {
   return exits;
 }
 
-// Проверка геометрической легальности стены за O(1)
-function wallGeometryLegal(r, c, o) {
-  const maxR = boardRows - 2;
-  if (r < 0 || r > maxR || c < 0 || c > 7) return false;
-  const idx = (r << 3) + c;
-  if (o === 0) { // Horizontal
-    if (hWalls[idx] || vWalls[idx]) return false;
-    if ((c > 0 && hWalls[idx - 1]) || (c < 7 && hWalls[idx + 1])) return false;
-    return true;
-  } else { // Vertical
-    if (vWalls[idx] || hWalls[idx]) return false;
-    if ((r > 0 && vWalls[idx - 8]) || (r < maxR && vWalls[idx + 8])) return false;
-    return true;
-  }
-}
-
-function placeWallFast(r, c, o) {
-  const idx = (r << 3) + c;
-  if (o === 0) {
-    hWalls[idx] = 1;
-    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
-  } else {
-    vWalls[idx] = 1;
-    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
-  }
-  totalWallsPlaced++;
-}
-
-function removeWallFast(r, c, o) {
-  const idx = (r << 3) + c;
-  if (o === 0) {
-    hWalls[idx] = 0;
-    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
-  } else {
-    vWalls[idx] = 0;
-    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
-  }
-  totalWallsPlaced--;
-}
-
-// Генерация легальных шагов пешки (включая прямые и диагональные прыжки)
-const DR = [-1, 1, 0, 0];
-const DC = [0, 0, -1, 1];
-
 function getPawnSteps(pR, pC, oR, oC) {
   const out = [];
   for (let d = 0; d < 4; d++) {
     if (!canStepDir(pR, pC, d)) continue;
     const nr = pR + DR[d], nc = pC + DC[d];
     if (nr === oR && nc === oC) {
-      // Прямой прыжок через фишку соперника
       if (canStepDir(oR, oC, d)) {
         out.push((oR + DR[d]) * 9 + (oC + DC[d]));
       } else {
-        // Диагональные прыжки при преграде позади соперника
-        if (d < 2) { // Шли вертикально -> пробуем влево/вправо от соперника
+        if (d < 2) {
           if (canLeft(oR, oC)) out.push(oR * 9 + (oC - 1));
           if (canRight(oR, oC)) out.push(oR * 9 + (oC + 1));
-        } else { // Шли горизонтально -> пробуем вверх/вниз от соперника
+        } else {
           if (canUp(oR, oC)) out.push((oR - 1) * 9 + oC);
           if (canDown(oR, oC)) out.push((oR + 1) * 9 + oC);
         }
@@ -242,9 +648,6 @@ function getPawnSteps(pR, pC, oR, oC) {
   return out;
 }
 
-// ============================================================================
-// СПЕЦИАЛИЗИРОВАННЫЕ АЛГОРИТМЫ ОЦЕНКИ: ДУЭЛЬ 9x9 vs ГОНКА 9x13
-// ============================================================================
 function evaluatePosition(isMyTurn) {
   const oppGoal = isRaceMode ? 0 : boardRows - 1;
   if (myR === 0) return 100000000;
@@ -259,42 +662,24 @@ function evaluatePosition(isMyTurn) {
   if (myDist < 0) return -100000000;
   if (oppDist < 0) return 100000000;
 
-  // Учет права хода (темпа): тот, чей сейчас ход, фактически на 0.5 шага ближе
   const tempo = isMyTurn ? 750 : -750;
   const myExits = countOptimalExits(myR, myC, maps.meMap);
   const oppExits = countOptimalExits(oppR, oppC, maps.oppMap);
 
   if (isRaceMode) {
-    // ------------------- АЛГОРИТМ 1: ГОНКА 9x13 -------------------
     let score = (oppDist - myDist) * 1650 + tempo;
-
-    // Нелинейная ценность запаса стен (в гонке 15 стен)
     score += (myWalls - oppWalls) * 95;
     if (myWalls === 0 && oppWalls > 0) score -= 1400;
     if (oppWalls === 0 && myWalls > 0) score += 1400;
-
-    // Свобода маневра (ширина коридора к финишу)
     score += (myExits - oppExits) * 140;
-    if (oppExits <= 1 && myWalls > 0) score += 320; // Соперник зажат в узком туннеле
+    if (oppExits <= 1 && myWalls > 0) score += 320;
     if (myExits <= 1 && oppWalls > 0) score -= 340;
-
-    // Сепарация дорожек: когда мы ведем в гонке, выгодно идти по отдельной колонке,
-    // чтобы противник не мог одной стеной перекрыть нас и не задеть себя
     const colDiff = Math.abs(myC - oppC);
-    if (myDist <= oppDist) {
-      score += colDiff * 24;
-    }
-
-    // Давление в эндшпиле
-    if (myDist <= 4 || oppDist <= 4) {
-      score += (oppDist - myDist) * 550;
-    }
+    if (myDist <= oppDist) score += colDiff * 24;
+    if (myDist <= 4 || oppDist <= 4) score += (oppDist - myDist) * 550;
     return score;
   } else {
-    // ------------------- АЛГОРИТМ 2: ДУЭЛЬ 9x9 -------------------
     let score = (oppDist - myDist) * 1600 + tempo;
-
-    // Учет контактного прыжка (если пешки стоят вплотную друг к другу)
     if (Math.abs(myR - oppR) + Math.abs(myC - oppC) === 1) {
       if (isMyTurn) {
         const steps = getPawnSteps(myR, myC, oppR, oppC);
@@ -308,35 +693,20 @@ function evaluatePosition(isMyTurn) {
         }
       }
     }
-
-    // Экономика стен в Дуэли 9x9: остаться с 0 стен против соперника со стенами смертельно
     score += (myWalls - oppWalls) * 85;
     if (myWalls === 0 && oppWalls > 0) score -= 1600;
     if (oppWalls === 0 && myWalls > 0) score += 1600;
-
-    // Контроль альтернативных маршрутов (Exits)
     score += (myExits - oppExits) * 155;
     if (oppExits === 1 && myWalls > 0) score += 360;
     if (myExits === 1 && oppWalls > 0) score -= 380;
-
-    // Контроль центра в дебюте и миттельшпиле
     const myCenter = 4 - Math.abs(myC - 4);
     const oppCenter = 4 - Math.abs(oppC - 4);
     score += (myCenter - oppCenter) * 18;
-
-    // Обострение цены каждого темпа у финиша
-    if (myDist <= 3 || oppDist <= 3) {
-      score += (oppDist - myDist) * 600;
-    }
+    if (myDist <= 3 || oppDist <= 3) score += (oppDist - myDist) * 600;
     return score;
   }
 }
 
-// Кодирование хода в одно 32-битное число:
-// type (0=step, 1=wall): bit 0
-// o (0=h, 1=v): bit 1
-// r (0..12): bits 2..5
-// c (0..8): bits 6..9
 function packMove(type, r, c, o) {
   return (type & 1) | ((o & 1) << 1) | ((r & 15) << 2) | ((c & 15) << 6);
 }
@@ -349,9 +719,6 @@ function unpackMove(code) {
   };
 }
 
-// ============================================================================
-// ГЕНЕРАЦИЯ И СОРТИРОВКА ХОДОВ (ШАГИ + УМНЫЙ ОТБОР СТЕН И 2-ХОДОВЫХ ЛОВУШЕК)
-// ============================================================================
 function generateMoves(maximizing, depth, ttBestCode, isRoot) {
   const pR = maximizing ? myR : oppR;
   const pC = maximizing ? myC : oppC;
@@ -371,47 +738,33 @@ function generateMoves(maximizing, depth, ttBestCode, isRoot) {
   const moveCodes = [];
   const movePrios = [];
 
-  // 1. Все легальные шаги пешкой
   const steps = getPawnSteps(pR, pC, eR, eC);
   for (let i = 0; i < steps.length; i++) {
     const cell = steps[i];
     const sr = (cell / 9) | 0;
     const sc = cell - sr * 9;
     const code = packMove(0, sr, sc, 0);
-
-    // Победа в 1 ход — мгновенный возврат
-    if (sr === pGoal) {
-      return [code];
-    }
+    if (sr === pGoal) return [code];
 
     const newD = pMap[cell];
     const stepGain = curP - newD;
     let prio = stepGain * 10000 + history[code];
-
     if (code === ttBestCode) prio += 5000000;
-    // На пустой доске в дебюте приоритет у быстрого захвата темпа пешкой
     if (totalWallsPlaced === 0 && stepGain > 0) prio += 7500;
-    // Прыжок вперед через соперника (+2 клетки за 1 ход)
     if (stepGain >= 2) prio += 6000;
 
     moveCodes.push(code);
     movePrios.push(prio);
   }
 
-  // Если стенок нет — сортируем только шаги
-  if (pWalls <= 0) {
-    return sortMoves(moveCodes, movePrios);
-  }
+  if (pWalls <= 0) return sortMoves(moveCodes, movePrios);
 
-  // 2. Генерация тактических стен (блокирующих, тормозящих и подготовительных L-ловушек)
   const maxR = boardRows - 2;
   const wallCodes = [];
   const wallPrios = [];
 
   for (let r = 0; r <= maxR; r++) {
     for (let c = 0; c < 8; c++) {
-      // Быстрый фильтр релевантности: рассматриваем стены, которые находятся
-      // рядом с пешкой врага, на градиенте его кратчайшего пути или рядом с уже стоящими стенами
       const idxTL = r * 9 + c;
       const dTL = eMap[idxTL];
       const dTR = eMap[idxTL + 1];
@@ -424,14 +777,11 @@ function generateMoves(maximizing, depth, ttBestCode, isRoot) {
       for (let o = 0; o < 2; o++) {
         if (!wallGeometryLegal(r, c, o)) continue;
 
-        // Проверяем, пересекает ли стена хотя бы одно ребро кратчайшего графа соперника
         let cutsGradient = false;
         if (o === 0) {
-          cutsGradient = (Math.abs(dTL - dBL) === 1 && dTL <= curE) ||
-                         (Math.abs(dTR - dBR) === 1 && dTR <= curE);
+          cutsGradient = (Math.abs(dTL - dBL) === 1 && dTL <= curE) || (Math.abs(dTR - dBR) === 1 && dTR <= curE);
         } else {
-          cutsGradient = (Math.abs(dTL - dTR) === 1 && dTL <= curE) ||
-                         (Math.abs(dBL - dBR) === 1 && dBL <= curE);
+          cutsGradient = (Math.abs(dTL - dTR) === 1 && dTL <= curE) || (Math.abs(dBL - dBR) === 1 && dBL <= curE);
         }
 
         if (!isRoot && !cutsGradient && !nearEnemy && !nearMe) continue;
@@ -444,18 +794,15 @@ function generateMoves(maximizing, depth, ttBestCode, isRoot) {
         const newE = nEMap[eR * 9 + eC];
         removeWallFast(r, c, o);
 
-        // Запрещено полностью запирать любого игрока (newP === -1 или newE === -1)
         if (newP < 0 || newE < 0) continue;
 
         const eGain = newE - curE;
         const pLoss = newP - curP;
         const netDelta = eGain - pLoss;
 
-        // Считаем, уменьшает ли стена число выходов соперника (подготовка 2-ходовой ловушки!)
         const newEExits = countOptimalExits(eR, eC, nEMap);
         const exitDrop = curEExits - newEExits;
 
-        // Внутри дерева отсекаем бесполезные стены, которые не дают ни выигрыша темпа, ни сужения коридора
         if (!isRoot && netDelta < 0 && exitDrop <= 0) continue;
         if (!isRoot && netDelta === 0 && exitDrop <= 0 && !nearEnemy) continue;
 
@@ -465,18 +812,12 @@ function generateMoves(maximizing, depth, ttBestCode, isRoot) {
         if (code === ttBestCode) prio += 5000000;
         if (killer[depth][0] === code || killer[depth][1] === code) prio += 4500;
 
-        // Дополнительные бонусы под конкретный режим
         if (isRaceMode) {
-          // В гонке вертикальная стена между нами и соперником изолирует его дорожку
           if (o === 1 && Math.abs(c - eC) <= 1 && Math.abs(r - eR) <= 2) prio += 1100;
-          // Жесткий штраф, если стена удлиняет наш собственный путь к финишу
           if (pLoss > 0) prio -= pLoss * 2400;
         } else {
-          // В дуэли стена, которая разворачивает врага на 2+ хода при 0 потерь для нас — главный приоритет
           if (eGain >= 2 && pLoss === 0) prio += 4000;
         }
-
-        // Не тратить стену на 1-м ходу партии без реального торможения соперника
         if (totalWallsPlaced === 0 && netDelta <= 0) prio -= 12000;
 
         wallCodes.push(code);
@@ -495,7 +836,6 @@ function generateMoves(maximizing, depth, ttBestCode, isRoot) {
     moveCodes.push(wCode);
     movePrios.push(wallPrios[idx]);
   }
-
   return sortMoves(moveCodes, movePrios);
 }
 
@@ -523,9 +863,6 @@ function getFullStateKey(maximizing) {
   return lo + ":" + hi;
 }
 
-// ============================================================================
-// PRINCIPAL VARIATION SEARCH (PVS / ALPHA-BETA) С ТАБЛИЦЕЙ ТРАНСПОЗИЦИЙ
-// ============================================================================
 function pvs(depth, maximizing, alpha, beta) {
   if ((++nodes & 127) === 0 && now() >= deadline) {
     timedOut = true;
@@ -575,22 +912,17 @@ function pvs(depth, maximizing, alpha, beta) {
       if (maximizing) myWalls--; else oppWalls--;
     }
 
-    // Late Move Reduction (LMR) для поздних тихих ходов
     let nextDepth = depth - 1;
-    if (depth >= 4 && i >= 8 && mType === 1) {
-      nextDepth = depth - 2;
-    }
+    if (depth >= 4 && i >= 8 && mType === 1) nextDepth = depth - 2;
 
     let val = pvs(nextDepth, !maximizing, alpha, beta);
 
-    // Если редуцированный ход улучшает оценку — пересчитываем на полную глубину
     if (!timedOut && nextDepth < depth - 1) {
       if ((maximizing && val > alpha) || (!maximizing && val < beta)) {
         val = pvs(depth - 1, !maximizing, alpha, beta);
       }
     }
 
-    // Откат хода
     if (mType === 0) {
       if (maximizing) { myR = savedR; myC = savedC; }
       else { oppR = savedR; oppC = savedC; }
@@ -634,19 +966,12 @@ function searchBestMove(timeBudgetMs, maxSearchDepth) {
   history.fill(0);
   for (let i = 0; i < 32; i++) { killer[i][0] = 0; killer[i][1] = 0; }
 
-  nodes = 0;
-  ttHits = 0;
-  cutoffs = 0;
-  timedOut = false;
-  completedDepth = 0;
-
-  const start = now();
-  deadline = start + timeBudgetMs;
+  nodes = 0; ttHits = 0; cutoffs = 0; timedOut = false; completedDepth = 0;
+  deadline = now() + timeBudgetMs;
 
   const rootMoves = generateMoves(true, 1, -1, true);
   if (rootMoves.length === 0) return null;
 
-  // Если первый ход сразу приводит на линию финиша (r === 0) — играем мгновенно
   const firstUnpacked = unpackMove(rootMoves[0]);
   if (firstUnpacked.type === 0 && firstUnpacked.r === 0) {
     completedDepth = 1;
@@ -663,7 +988,6 @@ function searchBestMove(timeBudgetMs, maxSearchDepth) {
     let iterBestScore = -Infinity;
     let alpha = -Infinity;
 
-    // Ставим лучший ход прошлой итерации (PV) первым для максимального отсечения
     const ordered = [bestCode];
     for (let i = 0; i < rootMoves.length; i++) {
       if (rootMoves[i] !== bestCode) ordered.push(rootMoves[i]);
@@ -694,7 +1018,6 @@ function searchBestMove(timeBudgetMs, maxSearchDepth) {
       }
 
       if (timedOut) break;
-
       if (score > iterBestScore) {
         iterBestScore = score;
         iterBestCode = code;
@@ -705,12 +1028,11 @@ function searchBestMove(timeBudgetMs, maxSearchDepth) {
     if (!timedOut) {
       bestCode = iterBestCode;
       completedDepth = depth;
-      if (iterBestScore >= 90000000) break; // Форсированная победа найдена
+      if (iterBestScore >= 90000000) break;
     } else {
       break;
     }
   }
-
   return unpackMove(bestCode);
 }
 
@@ -727,23 +1049,7 @@ function loadBoardWalls(m) {
       const r = +parts[0], c = +parts[1], o = parts[2] === "h" ? 0 : 1;
       placeWallFast(r, c, o);
     }
-    return;
   }
-
-  if (!m.walls) return;
-  const addBank = (v, bank, o) => {
-    const val = v >>> 0;
-    for (let b = 0; b < 32; b++) {
-      if ((val & (1 << b)) !== 0) {
-        const idx = bank * 32 + b;
-        placeWallFast((idx / 8) | 0, idx % 8, o);
-      }
-    }
-  };
-  addBank(m.walls.h0, 0, 0); addBank(m.walls.h1, 1, 0);
-  addBank(m.walls.h2, 2, 0); addBank(m.walls.h3, 3, 0);
-  addBank(m.walls.v0, 0, 1); addBank(m.walls.v1, 1, 1);
-  addBank(m.walls.v2, 2, 1); addBank(m.walls.v3, 3, 1);
 }
 
 self.onmessage = function (e) {
@@ -755,25 +1061,37 @@ self.onmessage = function (e) {
     }
     if (m.type !== "search") return;
 
-    const newRows = m.rows === 13 ? 13 : 9;
-    if (newRows !== boardRows) {
+    const newRows = Number(m.rows) || 9;
+    const newCols = Number(m.cols) || 9;
+    if (newRows !== boardRows || newCols !== boardCols) {
       boardRows = newRows;
-      isRaceMode = boardRows === 13;
+      boardCols = newCols;
       wallDistCache.clear();
-    } else {
-      isRaceMode = boardRows === 13;
     }
-
-    myR = m.my.r; myC = m.my.c; myWalls = m.my.walls;
-    oppR = m.opp.r; oppC = m.opp.c; oppWalls = m.opp.walls;
+    isQuadMode = (m.mode === "quad" || boardCols === 11);
+    isRaceMode = (!isQuadMode && boardRows === 13);
 
     loadBoardWalls(m);
 
     const budget = Math.max(400, Math.min(3000, Number(m.timeMs) || 1600));
     const maxD = Math.min(16, Number(m.maxDepth) || 14);
-
     const t0 = now();
-    const bestMove = searchBestMove(budget, maxD);
+
+    let bestMove = null;
+    if (isQuadMode && m.players) {
+      quadPlayers = [
+        { ...m.players.me },
+        { ...m.players.left },
+        { ...m.players.top },
+        { ...m.players.right }
+      ];
+      bestMove = searchBestQuadMove(budget);
+    } else {
+      myR = m.my.r; myC = m.my.c; myWalls = m.my.walls;
+      oppR = m.opp.r; oppC = m.opp.c; oppWalls = m.opp.walls;
+      bestMove = searchBestMove(budget, maxD);
+    }
+
     const elapsed = Math.round(now() - t0);
 
     self.postMessage({
