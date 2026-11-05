@@ -1,0 +1,1317 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b111e">
+<title>WallRush GrandMaster Engine Pro</title>
+<style>
+:root{
+  --bg:#0b111e;--panel:#151f32;--panel2:#1c2940;--text:#eef4ff;--muted:#8b9ab3;--line:#2b3a54;
+  --blue:#347fff;--blueDeep:#2455a8;--red:#e33b50;--redDeep:#a92335;--green:#39e0a1;
+  --board:#111a29;--boardLine:#34445c;--boardEdge:#26344b;--danger:#ff5667;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+html,body{width:100%;height:100%;min-height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+body{padding:env(safe-area-inset-top) 8px env(safe-area-inset-bottom)}
+button{font:inherit;color:inherit;border:0;user-select:none}
+
+#appBlocker{
+  position:fixed;
+  inset:0;
+  z-index:999999;
+  background:#0b111e;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+  text-align:center;
+  font-family:Inter,system-ui,sans-serif;
+  color:#fff;
+}
+
+.app{
+  width:min(100%,680px);
+  height:100dvh;
+  margin:auto;
+  padding:4px 0 4px;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  gap:5px;
+}
+
+.top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex:0 0 32px;
+  height:32px;
+  width:100%;
+}
+.brand{display:flex;align-items:center;gap:6px}
+.brand-mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(145deg,#3b86ff,#195bd4);box-shadow:0 3px 8px #1c61d055;display:grid;grid-template-columns:1fr 1fr;gap:2px;padding:3px}
+.brand-mark i{background:#fff;border-radius:1.5px}
+.brand-name{font-size:16px;font-weight:950;letter-spacing:-.4px}
+
+.resign-btn{
+  background:#261824;
+  border:1px solid #5a2634;
+  color:#ff7a88;
+  border-radius:8px;
+  padding:0 9px;
+  height:28px;
+  font-size:11px;
+  font-weight:900;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:4px;
+  white-space:nowrap;
+  transition:background .15s ease, transform .1s ease;
+}
+.resign-btn:active{background:#381c2b;transform:scale(0.97)}
+
+.control-bar{
+  display:flex;
+  gap:6px;
+  align-items:center;
+  width:100%;
+  flex:0 0 28px;
+  height:28px;
+}
+
+.ctrl-btn{
+  background:#18243a;
+  border:1px solid #2b3d58;
+  color:#eef4ff;
+  border-radius:8px;
+  height:28px;
+  padding:0 8px;
+  font-size:11px;
+  font-weight:900;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:5px;
+  white-space:nowrap;
+  flex:1 1 0;
+  min-width:0;
+  transition:background .15s ease, transform .1s ease;
+}
+.ctrl-btn:active{background:#233552;transform:scale(0.98)}
+
+.turn-badge{
+  padding:2px 6px;
+  border-radius:4px;
+  font-size:9.5px;
+  font-weight:950;
+}
+.turn-badge.me{background:#2768dd;color:#fff}
+.turn-badge.opp{background:#bd263a;color:#fff}
+.turn-badge.blue{background:#2768dd;color:#fff}
+.turn-badge.red{background:#bd263a;color:#fff}
+
+.finish-bar-wrap{
+  flex:0 0 14px;
+  height:14px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  overflow:hidden;
+}
+.finish-bar{
+  display:none;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  width:100%;
+}
+.finish-bar.visible{
+  display:flex;
+  animation:popIn .25s ease;
+}
+.finish-line{
+  flex:1;
+  height:1.5px;
+  background:#1e8e60;
+  box-shadow:0 0 6px rgba(30, 142, 96, 0.4);
+}
+.finish-label{
+  display:flex;
+  align-items:center;
+  gap:4px;
+  font-size:10.5px;
+  font-weight:950;
+  color:#1ebf7c;
+  letter-spacing:3px;
+}
+
+.players-wrap{position:relative;flex:0 0 44px;height:44px}
+.players{display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:6px;width:100%;height:100%}
+.player{
+  height:44px;
+  width:100%;
+  min-width:0;
+  background:var(--panel);
+  border:2px solid transparent;
+  border-radius:12px;
+  padding:3px 8px;
+  display:flex;
+  align-items:center;
+  gap:6px;
+  position:relative;
+  user-select:none;
+  transition:border-color .25s ease, box-shadow .25s ease, background .25s ease;
+}
+
+.player.is-blue{background:linear-gradient(135deg,#315b9e,#244780)}
+.player.is-red{background:linear-gradient(135deg,#e14858,#bd263a)}
+.player.is-blue.active{border-color:#9dbdff;box-shadow:0 0 0 2.5px #6f9cff33,0 4px 12px #276de344}
+.player.is-red.active{border-color:#ff8792;box-shadow:0 0 0 2.5px #ff566733,0 4px 12px #d72d3c44}
+
+.player .ball{width:26px;height:26px;border-radius:50%;flex:none;box-shadow:inset -4px -5px 7px #0008,inset 3px 3px 6px #fff8,0 3px 8px #0008;transition:transform .2s ease}
+.ball.blue{background:radial-gradient(circle at 30% 23%,#bcdcff,#4e91ff 42%,#1646a1)}
+.ball.red{background:radial-gradient(circle at 30% 23%,#ffd0d4,#ff6370 42%,#a7192b)}
+.ptext{min-width:0;flex:1 1 0;overflow:hidden}
+.pname{font-size:11px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmeta{font-size:10px;margin-top:1px;color:#eaf1ff}
+.wallcount{font-size:11.5px;font-weight:950}
+.vs{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:4;background:#18243a;color:#8e9bb2;border-radius:7px;padding:2px 5px;font-weight:950;font-size:8.5px;pointer-events:none}
+
+.board-frame{
+  position:relative;
+  padding:0;
+  flex:1 1 auto;
+  min-height:0;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  background:transparent;
+  overflow:hidden;
+}
+
+.board-shell{
+  position:relative;
+  border-radius:16px;
+  overflow:hidden;
+  background:var(--board);
+  box-shadow:inset 0 0 0 1px #26354c,0 6px 20px #0008;
+  flex:0 0 auto;
+}
+
+.board-shell.mode-race:after{
+  content:"";
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:2;
+  border-top:3px solid #2ae48f;
+  box-shadow:inset 0 1px 0 #46ffaa, 0 -1px 8px rgba(42, 228, 143, 0.4);
+  background:linear-gradient(to bottom, rgba(30, 191, 124, 0.22) 0%, rgba(30, 191, 124, 0.07) 12%, transparent 26%);
+  border-top-left-radius:16px;
+  border-top-right-radius:16px;
+}
+
+.glow-edge{
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  z-index:0;
+  opacity:0;
+  transition:opacity .35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.glow-edge.bottom-glow{
+  background:linear-gradient(to top, rgba(57, 135, 255, 0.32) 0%, rgba(57, 135, 255, 0.08) 22%, transparent 40%);
+  box-shadow:inset 0 -10px 24px rgba(52, 127, 255, 0.45);
+}
+.glow-edge.top-glow{
+  background:linear-gradient(to bottom, rgba(227, 59, 80, 0.32) 0%, rgba(227, 59, 80, 0.08) 22%, transparent 40%);
+  box-shadow:inset 0 10px 24px rgba(227, 59, 80, 0.45);
+}
+.glow-edge.active{opacity:1}
+
+.board-grid{
+  position:absolute;
+  inset:0;
+  display:grid;
+  z-index:1;
+}
+.cell{
+  position:relative;
+  border-right:1px solid #34445c;
+  border-bottom:1px solid #34445c;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  touch-action:manipulation;
+}
+.cell.legal:after{
+  content:"";
+  width:9px;
+  height:9px;
+  border-radius:50%;
+  background:#367ddd;
+  box-shadow:0 0 8px #367ddd88;
+  animation:dotPop .2s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+@keyframes dotPop{from{transform:scale(0.3);opacity:0}to{transform:scale(1);opacity:1}}
+
+.cell.engine{background:#39e0a11a!important;position:relative}
+.cell.engine:before{content:"";position:absolute;inset:2px;border:2px solid #52e9b6;border-radius:6px;box-shadow:0 0 10px #39e0a1aa,inset 0 0 5px #39e0a133;animation:pulseBest 1.1s ease-in-out infinite;pointer-events:none}
+.cell.engine:after{content:"BEST";position:absolute;right:2px;top:2px;color:#eafff7;background:#159b70;border-radius:3px;padding:1px 2.5px;font-size:5.5px;font-weight:950;letter-spacing:.4px;z-index:7}
+@keyframes pulseBest{50%{transform:scale(.94);opacity:.72}}
+
+.piece-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
+.board-piece{
+  position:absolute;
+  border-radius:50%;
+  transform:translate(-50%,-50%);
+  box-shadow:inset -4px -5px 8px #0008,inset 3px 3px 6px #fff9,0 5px 10px #0009;
+  transition:left .22s cubic-bezier(0.34, 1.3, 0.64, 1), top .22s cubic-bezier(0.34, 1.3, 0.64, 1);
+  will-change:left, top;
+}
+.board-piece.blue{background:radial-gradient(circle at 29% 22%,#d5e9ff,#3987ff 45%,#174ba9)!important}
+.board-piece.red{background:radial-gradient(circle at 29% 22%,#ffd9dc,#e84859 45%,#9e1729)!important}
+
+.wall-layer{position:absolute;inset:0;z-index:10;pointer-events:none}
+.wall-piece{
+  position:absolute;
+  border-radius:4px;
+  background:linear-gradient(180deg,#485a79,#202d47);
+  border:1.5px solid #6f81a0;
+  box-shadow:0 3px 8px #1c294955,inset 1px 1px 2px #fff3;
+  pointer-events:none;
+  animation:wallDrop .2s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+@keyframes wallDrop{0%{transform:translate(-50%,-50%) scale(0.5);opacity:0}100%{transform:translate(-50%,-50%) scale(1);opacity:1}}
+
+.wall-piece.h{height:8px;transform:translate(-50%,-50%)}
+.wall-piece.v{width:8px;transform:translate(-50%,-50%)}
+.wall-piece.engine{background:linear-gradient(180deg,#58efb9,#168e67)!important;border-color:#9dffe0!important;box-shadow:0 0 12px #39e0a1cc,0 3px 8px #0005!important;z-index:15}
+.wall-piece.ghost{opacity:.95;border-style:dashed;filter:drop-shadow(0 6px 6px #0009);z-index:20;animation:none}
+.wall-piece.ghost.bad{background:linear-gradient(180deg,#ff6b79,#9e1f31)!important;border-color:#ffadb5!important;box-shadow:0 0 12px #ff5364aa!important}
+
+.bottom-container{
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  flex:0 0 auto;
+}
+.bottom-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.apply{height:40px;border-radius:12px;background:linear-gradient(135deg,#3c86ff,#285bc6);color:#fff;font-weight:950;font-size:12.5px;box-shadow:0 4px 12px #2768dd33;cursor:pointer;transition:transform .12s}
+.apply:active{transform:scale(0.98)}
+.apply:disabled{opacity:.32;filter:grayscale(.7);box-shadow:none;cursor:default}
+.undo{height:40px;border-radius:12px;background:var(--panel);border:1px solid var(--line);font-weight:900;font-size:12.5px;cursor:pointer;transition:transform .12s}
+.undo:active{transform:scale(0.98)}
+
+.dock{background:#121c2b;color:#dbe5f5;border-radius:13px;padding:4px 8px;display:grid;grid-template-columns:40px 1fr 1fr;gap:6px;border:1px solid #24344c;width:100%;touch-action:none}
+.dock-count{display:flex;align-items:center;justify-content:center;gap:3px;font-weight:950;font-size:13px}
+.wall-tool{
+  height:38px;
+  border-radius:10px;
+  background:#18243a;
+  box-shadow:none;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:grab;
+  touch-action:none;
+  transition:all .15s ease;
+}
+.wall-tool.active{box-shadow:0 0 0 2px #39e0a166;color:#5ee9b8}
+.wall-tool:active{cursor:grabbing;transform:scale(0.98)}
+
+.wall-icon{
+  display:block;
+  background:linear-gradient(180deg,#5a6e91,#283857);
+  border:1px solid #8295b7;
+  border-radius:2px;
+  box-shadow:0 2px 4px #0004;
+}
+.wall-tool[data-orient="h"] .wall-icon{width:22px;height:6px}
+.wall-tool[data-orient="v"] .wall-icon{width:6px;height:22px}
+
+.settings{
+  width:100%;
+  height:38px;
+  border-radius:12px;
+  background:#18243a;
+  color:#fff;
+  border:1px solid #2a3b55;
+  box-shadow:0 3px 10px #0005;
+  font-weight:950;
+  font-size:12.5px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:6px;
+  cursor:pointer;
+  transition:transform .12s}
+.settings:active{transform:scale(0.99)}
+.settings span{font-size:14px}
+
+.modal{position:fixed;inset:0;z-index:100;background:#050a14dd;backdrop-filter:blur(12px);display:none;padding:16px}
+.modal.open{display:flex}.modal-card{width:min(100%,520px);margin:auto;min-height:44vh;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px;display:flex;flex-direction:column;box-shadow:0 20px 60px #0009}
+.modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.modal-head h2{margin:0;font-size:18px}.close{width:34px;height:34px;border-radius:9px;background:var(--panel2);font-size:20px;cursor:pointer}
+.setting{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}.setting small{display:block;color:var(--muted);margin-top:2px;font-size:10.5px}
+.switch{width:46px;height:26px;border-radius:16px;background:#41516c;padding:2.5px;cursor:pointer}.switch i{display:block;width:21px;height:21px;background:#fff;border-radius:50%;transition:.18s}.switch.on{background:var(--green)}.switch.on i{transform:translateX(20px)}
+.theme{display:flex;gap:5px}.theme button{padding:6px 10px;border-radius:8px;background:var(--panel2);font-size:11px;cursor:pointer}.theme button.active{outline:2px solid var(--blue)}
+
+.author-box{
+  margin-top:auto;
+  padding-top:14px;
+  text-align:center;
+  font-size:13px;
+  font-weight:800;
+  color:#9eb1d1;
+  letter-spacing:.3px;
+}
+.author-box a{color:#52a5ff;text-decoration:none}
+
+.light{--board:#eef1f7;--boardLine:#b8c0d0;--boardEdge:#aab5ca;--bg:#edf1f8;--panel:#fff;--panel2:#edf1f7;--text:#1c2940;--muted:#78869e;--line:#d5ddea}
+.light .cell{border-right-color:#c4cddc;border-bottom-color:#c4cddc}
+.light .resign-btn,.light .undo,.light .ctrl-btn{background:#fff;border-color:#d5ddea;color:#1c2940}
+.light .dock{background:#fff;border-color:#d5ddea;color:#1c2940}
+.light .wall-tool{background:#edf2f9;color:#1c2940}
+.light .wall-icon{background:linear-gradient(180deg,#c8d4ec,#8da0c4);border-color:#a4b6d4}
+.light .settings{background:#233554;color:#fff}
+.light .author-box{color:#435574}
+
+#engineSearchPill{position:fixed;z-index:99990;top:calc(env(safe-area-inset-top) + 7px);left:50%;transform:translate(-50%,-14px) scale(.96);opacity:0;pointer-events:none;display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:999px;background:rgba(12,22,38,.94);border:1px solid #31506e;box-shadow:0 7px 22px #0007,0 0 16px #39e0a122;backdrop-filter:blur(12px);font-size:11px;font-weight:950;letter-spacing:.2px;transition:opacity .16s ease,transform .16s cubic-bezier(.2,.8,.2,1)}
+#engineSearchPill.show{opacity:1;transform:translate(-50%,0) scale(1)}
+#engineSearchPill .dot{width:7px;height:7px;border-radius:50%;background:#39e0a1;box-shadow:0 0 9px #39e0a1;animation:engineDot .7s ease-in-out infinite alternate}
+#engineSearchPill .sub{color:#8fa3bd;font-weight:800;font-size:9px}
+@keyframes engineDot{to{transform:scale(.65);opacity:.55}}
+</style>
+</head>
+<body>
+<div id="engineSearchPill"><span class="dot"></span><span>ИЩЕМ ХОД</span><span class="sub" id="engineSearchSub">просчёт...</span></div>
+
+<div id="appBlocker">
+  <div style="font-size:56px;margin-bottom:12px;">🔒</div>
+  <h2 style="font-size:20px;font-weight:950;margin-bottom:8px;">Нет активной подписки</h2>
+  <p style="color:#8b9ab3;font-size:13.5px;line-height:1.5;margin-bottom:24px;">
+    Для получения доступа приобретите подписку в Telegram:<br>
+    <a href="https://t.me/quf97" target="_blank" style="color:#347fff;text-decoration:none;font-weight:900;font-size:15px;display:inline-block;margin-top:6px;">@quf97</a>
+  </p>
+  <button onclick="window.Telegram?.WebApp?.close()" style="background:#347fff;color:#fff;border:0;padding:12px 28px;border-radius:12px;font-weight:900;font-size:13px;cursor:pointer;box-shadow:0 4px 14px #2768dd44;">Закрыть</button>
+</div>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="brand-mark"><i></i><i></i><i></i><i></i></div>
+      <div class="brand-name">WALLHACK PRO</div>
+    </div>
+    <button class="resign-btn" id="resign" title="Сбросить партию">↻ Сброс</button>
+  </header>
+
+  <div class="control-bar">
+    <button class="ctrl-btn" id="modeToggle" title="Сменить режим">
+      <span id="modeLabel">Дуэль 9×9</span>
+    </button>
+    <button class="ctrl-btn" id="firstTurnToggle" title="Кто делает 1-й ход">
+      <span>1-й:</span>
+      <span class="turn-badge me" id="firstTurnBadge">Ты</span>
+    </button>
+    <button class="ctrl-btn" id="colorToggle" title="Твой цвет фишки">
+      <span>Цвет:</span>
+      <span class="turn-badge blue" id="colorBadge">Синий</span>
+    </button>
+    <button class="ctrl-btn" id="racePosToggle" style="display:none" title="Твоя стартовая позиция в гонке">
+      <span>Ты:</span>
+      <span id="racePosBadge">Справа</span>
+    </button>
+    <button class="ctrl-btn" id="wallsToggle" style="display:none" title="Количество стен">
+      <span>Стен:</span>
+      <span id="wallsBadge">15</span>
+    </button>
+  </div>
+
+  <div class="finish-bar-wrap">
+    <div class="finish-bar" id="finishBar">
+      <div class="finish-line"></div>
+      <div class="finish-label">🏁 ФИНИШ</div>
+      <div class="finish-line"></div>
+    </div>
+  </div>
+
+  <div class="players-wrap">
+    <div class="players">
+      <div class="player bottom-p active" id="pMe">
+        <div class="ball" id="pMeBall"></div>
+        <div class="ptext">
+          <div class="pname" id="pMeName">Ты</div>
+          <div class="pmeta"><span class="wallcount" id="meWalls">10</span> 🧱</div>
+        </div>
+      </div>
+      <div class="player top-p" id="pOpp">
+        <div class="ball" id="pOppBall"></div>
+        <div class="ptext">
+          <div class="pname" id="pOppName">Противник</div>
+          <div class="pmeta"><span class="wallcount" id="oppWalls">10</span> 🧱</div>
+        </div>
+      </div>
+    </div>
+    <div class="vs">VS</div>
+  </div>
+
+  <main class="board-frame" id="boardFrame">
+    <div class="board-shell mode-duel" id="boardShell">
+      <div class="glow-edge bottom-glow active" id="glowBottom"></div>
+      <div class="glow-edge top-glow" id="glowTop"></div>
+      <div class="board-grid" id="boardGrid"></div>
+      <div class="piece-layer" id="pieceLayer">
+        <div class="board-piece" id="pieceMe"></div>
+        <div class="board-piece" id="pieceOpp"></div>
+      </div>
+      <div class="wall-layer" id="wallLayer"></div>
+    </div>
+  </main>
+
+  <div class="bottom-container">
+    <div class="bottom-row">
+      <button class="apply" id="apply" disabled>✓ Применить совет</button>
+      <button class="undo" id="undo">↩ Назад</button>
+    </div>
+    
+    <section class="dock">
+      <div class="dock-count"><span>🧱</span><span id="dockCount">10</span></div>
+      <button class="wall-tool" data-orient="h" id="wallH" aria-label="Горизонтальная стена"><i class="wall-icon"></i></button>
+      <button class="wall-tool" data-orient="v" id="wallV" aria-label="Вертикальная стена"><i class="wall-icon"></i></button>
+    </section>
+    
+    <button class="settings" id="settings"><span>⚙</span> Настройки</button>
+  </div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="modal-card">
+    <div class="modal-head"><h2>Настройки</h2><button class="close" id="close">×</button></div>
+    <div class="setting">
+      <div><b>Тема</b><small>Оформление движка</small></div>
+      <div class="theme"><button id="darkBtn">Тёмная</button><button id="lightBtn">Светлая</button></div>
+    </div>
+    <div class="setting">
+      <div><b>Звуковые эффекты</b><small>Ход и установка стены</small></div>
+      <button class="switch on" id="soundSwitch"><i></i></button>
+    </div>
+    <div class="author-box">автор: <a href="https://t.me/qufpx" target="_blank" rel="noopener">@qufpx</a></div>
+  </div>
+</div>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<script>
+"use strict";
+
+const tg = window.Telegram?.WebApp;
+if(tg){
+  tg.ready(); tg.expand();
+  try{tg.setHeaderColor("#0b111e");tg.setBackgroundColor("#0b111e");tg.enableClosingConfirmation();}catch(e){}
+}
+
+async function verifyAccessSystem() {
+  const SECRET = "wallrush_ultra_secret_key_2026";
+  const hash = window.location.hash.substring(1);
+  const params = new URLSearchParams(hash);
+  
+  let uid = params.get("uid");
+  let exp = parseInt(params.get("exp"), 10);
+  let sign = params.get("sign");
+  const tgUid = tg?.initDataUnsafe?.user?.id;
+
+  async function checkSign(testUid, testExp, testSign) {
+    if (!testUid || !testExp || !testSign) return false;
+    if (testExp <= Math.floor(Date.now() / 1000)) return false;
+    if (tgUid && String(testUid) !== String(tgUid)) return false;
+
+    try {
+      const encoder = new TextEncoder();
+      const key = await crypto.subtle.importKey(
+        "raw",
+        encoder.encode(SECRET),
+        { name: "HMAC", hash: "SHA-256" },
+        false,
+        ["sign"]
+      );
+      const signatureBuffer = await crypto.subtle.sign(
+        "HMAC",
+        key,
+        encoder.encode(`${testUid}:${testExp}`)
+      );
+      const computedSign = Array.from(new Uint8Array(signatureBuffer))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+      return computedSign === testSign;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  if (await checkSign(uid, exp, sign)) {
+    try { tg?.CloudStorage?.setItem("sub_token", `${uid}:${exp}:${sign}`); } catch(e){}
+    try { localStorage.setItem("sub_token", `${uid}:${exp}:${sign}`); } catch(e){}
+    unlockApp();
+    return;
+  }
+
+  if (tg?.CloudStorage) {
+    tg.CloudStorage.getItem("sub_token", async (err, val) => {
+      if (!err && val) {
+        const [cUid, cExp, cSign] = val.split(":");
+        if (await checkSign(cUid, parseInt(cExp, 10), cSign)) {
+          unlockApp();
+          return;
+        }
+      }
+      checkLocalStorage();
+    });
+  } else {
+    checkLocalStorage();
+  }
+
+  async function checkLocalStorage() {
+    try {
+      const localVal = localStorage.getItem("sub_token");
+      if (localVal) {
+        const [lUid, lExp, lSign] = localVal.split(":");
+        if (await checkSign(lUid, parseInt(lExp, 10), lSign)) {
+          unlockApp();
+          return;
+        }
+      }
+    } catch(e){}
+  }
+
+  function unlockApp() {
+    const blocker = document.getElementById("appBlocker");
+    if (blocker) blocker.remove();
+  }
+}
+
+verifyAccessSystem();
+
+const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+let state, history = [], engineMove = null, selectedWall = null, soundOn = true, theme = "dark";
+let gameMode = "duel";
+let firstTurnSetting = "me";
+let myColorSetting = "blue";
+let raceSideSetting = "right";
+let raceWallsSetting = 15;
+let audio = null, dragging = false, dragOrient = null, ghostEl = null, ghostAnchor = null;
+let engineStats = {nodes:0, depth:0, elapsed:0, ttHits:0, cutoffs:0};
+
+const qArr = new Int16Array(160);
+const distArr = new Int8Array(160);
+
+function getBoardRows(){ return gameMode === "race" ? 13 : 9; }
+function getGoalRow(player){
+  if(gameMode === "race") return 0;
+  return player === "me" ? 0 : 8;
+}
+function getDefaultWalls(){
+  return gameMode === "duel" ? 10 : raceWallsSetting;
+}
+
+function initialState(){
+  const rows = getBoardRows();
+  const initWalls = getDefaultWalls();
+  let mePos, oppPos;
+  if(gameMode === "race"){
+    const myCol = raceSideSetting === "right" ? 6 : 2;
+    const oppCol = raceSideSetting === "right" ? 2 : 6;
+    mePos = {r:rows-1, c:myCol, walls:initWalls};
+    oppPos = {r:rows-1, c:oppCol, walls:initWalls};
+  } else {
+    mePos = {r:8, c:4, walls:initWalls};
+    oppPos = {r:0, c:4, walls:initWalls};
+  }
+  return {turn:firstTurnSetting, gameOver:false, me:mePos, opp:oppPos, walls:new Set()};
+}
+
+function wallKey(r,c,o){ return r+","+c+","+o; }
+
+function cloneState(){
+  return {
+    turn:state.turn, gameOver:state.gameOver,
+    me:{...state.me}, opp:{...state.opp}, walls:new Set(state.walls)
+  };
+}
+
+function save(){
+  history.push(cloneState());
+  if(history.length > 100) history.shift();
+}
+
+function restore(s){
+  state = {turn:s.turn, gameOver:s.gameOver, me:{...s.me}, opp:{...s.opp}, walls:new Set(s.walls)};
+  engineMove = null; selectedWall = null;
+  render(true); computeEngine();
+}
+
+function inBoard(r,c){
+  return r >= 0 && r < getBoardRows() && c >= 0 && c < 9;
+}
+
+function edgeBlocked(a,b,walls=state.walls){
+  const dr=b.r-a.r, dc=b.c-a.c;
+  if(dr === 0 && Math.abs(dc) === 1){
+    const c=Math.min(a.c,b.c);
+    return walls.has(wallKey(a.r,c,"v")) || walls.has(wallKey(a.r-1,c,"v"));
+  }
+  if(dc === 0 && Math.abs(dr) === 1){
+    const r=Math.min(a.r,b.r);
+    return walls.has(wallKey(r,a.c,"h")) || walls.has(wallKey(r,a.c-1,"h"));
+  }
+  return true;
+}
+
+function rawNeighbors(pos,walls=state.walls){
+  const out=[];
+  for(const [dr,dc] of dirs){
+    const nr=pos.r+dr,nc=pos.c+dc;
+    if(inBoard(nr,nc)){
+      const n={r:nr,c:nc};
+      if(!edgeBlocked(pos,n,walls)) out.push(n);
+    }
+  }
+  return out;
+}
+
+function legalMoves(player,walls=state.walls,pos=null,otherPos=null){
+  const me=pos || state[player];
+  const other=otherPos || state[player==="me"?"opp":"me"];
+  const out=[];
+  for(const n of rawNeighbors(me,walls)){
+    if(n.r===other.r && n.c===other.c){
+      const dr=n.r-me.r, dc=n.c-me.c;
+      const jump={r:other.r+dr,c:other.c+dc};
+      if(inBoard(jump.r,jump.c) && !edgeBlocked(other,jump,walls)){
+        out.push(jump);
+      }else{
+        const sides=[
+          {r:other.r+dc,c:other.c-dr},
+          {r:other.r-dc,c:other.c+dr}
+        ];
+        for(const x of sides){
+          if(inBoard(x.r,x.c) && !edgeBlocked(other,x,walls)) out.push(x);
+        }
+      }
+    }else{
+      out.push(n);
+    }
+  }
+  return out;
+}
+
+function shortestPath(player,walls=state.walls,start=null){
+  const s=start || state[player], goalRow=getGoalRow(player);
+  const rows=getBoardRows(), total=rows*9;
+  if(s.r===goalRow) return 0;
+  distArr.fill(-1,0,total);
+  let head=0,tail=0;
+  const startIdx=s.r*9+s.c;
+  distArr[startIdx]=0;
+  qArr[tail++]=startIdx;
+  while(head<tail){
+    const idx=qArr[head++];
+    const r=(idx/9)|0,c=idx%9,d=distArr[idx];
+    if(r===goalRow) return d;
+    for(const [dr,dc] of dirs){
+      const nr=r+dr,nc=c+dc;
+      if(nr<0||nr>=rows||nc<0||nc>=9) continue;
+      const ni=nr*9+nc;
+      if(distArr[ni]!==-1) continue;
+      let blocked=false;
+      if(dr===0){
+        const mc=Math.min(c,nc);
+        blocked=walls.has(wallKey(r,mc,"v"))||walls.has(wallKey(r-1,mc,"v"));
+      }else{
+        const mr=Math.min(r,nr);
+        blocked=walls.has(wallKey(mr,c,"h"))||walls.has(wallKey(mr,c-1,"h"));
+      }
+      if(!blocked){
+        distArr[ni]=d+1;
+        qArr[tail++]=ni;
+      }
+    }
+  }
+  return Infinity;
+}
+
+function legalWall(r,c,o,walls=state.walls){
+  const maxR=getBoardRows()-2;
+  if((o!=="h"&&o!=="v")||r<0||r>maxR||c<0||c>7) return false;
+  const k=wallKey(r,c,o);
+  if(walls.has(k)) return false;
+
+  if(o==="h"){
+    if(walls.has(wallKey(r,c,"v"))) return false;
+    if(walls.has(wallKey(r,c-1,"h"))||walls.has(wallKey(r,c+1,"h"))) return false;
+  }else{
+    if(walls.has(wallKey(r,c,"h"))) return false;
+    if(walls.has(wallKey(r-1,c,"v"))||walls.has(wallKey(r+1,c,"v"))) return false;
+  }
+
+  const copy=new Set(walls); copy.add(k);
+  return shortestPath("me",copy)!==Infinity && shortestPath("opp",copy)!==Infinity;
+}
+
+function getOppColor(){
+  return myColorSetting === "blue" ? "red" : "blue";
+}
+
+function updateBoardLayout(){
+  const frame = document.getElementById("boardFrame");
+  const shell = document.getElementById("boardShell");
+  if(!frame || !shell) return;
+  
+  const frameW = frame.clientWidth;
+  const frameH = frame.clientHeight;
+  if(frameW <= 0 || frameH <= 0) return;
+  
+  if(gameMode === "duel"){
+    const size = Math.min(frameW, frameH);
+    shell.style.width = size + "px";
+    shell.style.height = size + "px";
+  } else {
+    let w = frameH * (9 / 13);
+    let h = frameH;
+    if(w > frameW){
+      w = frameW;
+      h = frameW * (13 / 9);
+    }
+    shell.style.width = w + "px";
+    shell.style.height = h + "px";
+  }
+}
+
+function wallPosition(r,c,o){
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows();
+  return {x: rect.width * (c + 1) / 9, y: rect.height * (r + 1) / rows};
+}
+
+function cellCenterPosition(r,c){
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows();
+  return {x: rect.width * (c + 0.5) / 9, y: rect.height * (r + 0.5) / rows};
+}
+
+function createWallPiece(r,c,o,extra=""){
+  const el = document.createElement("div");
+  el.className = "wall-piece " + o + " " + extra;
+  const p = wallPosition(r,c,o);
+  el.style.left = p.x + "px";
+  el.style.top = p.y + "px";
+  
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows();
+  if(o === "h"){
+    el.style.width = (rect.width * (2/9) - 3.5) + "px";
+  } else {
+    el.style.height = (rect.height * (2/rows) - 3.5) + "px";
+  }
+  return el;
+}
+
+function updatePiecePositions(animate=true){
+  const pMe = cellCenterPosition(state.me.r, state.me.c);
+  const pOpp = cellCenterPosition(state.opp.r, state.opp.c);
+  
+  const elMe = document.getElementById("pieceMe");
+  const elOpp = document.getElementById("pieceOpp");
+  const oppColor = getOppColor();
+  
+  if(elMe) elMe.className = "board-piece " + myColorSetting;
+  if(elOpp) elOpp.className = "board-piece " + oppColor;
+
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows();
+  const pieceSize = Math.min(rect.width/9, rect.height/rows) * 0.58;
+  
+  if(elMe){ 
+    if(!animate){ elMe.style.transition = "none"; }
+    elMe.style.width = pieceSize + "px";
+    elMe.style.height = pieceSize + "px";
+    elMe.style.left = pMe.x + "px"; elMe.style.top = pMe.y + "px";
+    if(!animate){ requestAnimationFrame(()=>{ elMe.style.transition = ""; }); }
+  }
+  if(elOpp){ 
+    if(!animate){ elOpp.style.transition = "none"; }
+    elOpp.style.width = pieceSize + "px";
+    elOpp.style.height = pieceSize + "px";
+    elOpp.style.left = pOpp.x + "px"; elOpp.style.top = pOpp.y + "px";
+    if(!animate){ requestAnimationFrame(()=>{ elOpp.style.transition = ""; }); }
+  }
+}
+
+let currentRenderedRows = -1;
+function buildGridDOM(){
+  const grid = document.getElementById("boardGrid");
+  const rows = getBoardRows();
+  if(currentRenderedRows === rows) return;
+  
+  currentRenderedRows = rows;
+  grid.innerHTML = "";
+  grid.style.gridTemplateColumns = "repeat(9, 1fr)";
+  grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+  
+  for(let r=0; r<rows; r++) for(let c=0; c<9; c++){
+    const cell = document.createElement("div");
+    cell.className = "cell";
+    if(c === 8) cell.style.borderRight = "0";
+    if(r === rows - 1) cell.style.borderBottom = "0";
+    cell.dataset.r = r;
+    cell.dataset.c = c;
+    cell.addEventListener("click", ()=>onCell(r,c));
+    grid.appendChild(cell);
+  }
+}
+
+function render(animatePieces=true){
+  updateBoardLayout();
+  buildGridDOM();
+  
+  const grid = document.getElementById("boardGrid");
+  const layer = document.getElementById("wallLayer");
+  layer.innerHTML = "";
+  
+  const legal = state.gameOver ? [] : legalMoves(state.turn);
+  const isMyTurn = (state.turn === "me");
+  
+  const cells = grid.children;
+  for(let i=0; i<cells.length; i++){
+    const cell = cells[i];
+    const r = +cell.dataset.r, c = +cell.dataset.c;
+    
+    const isLegal = legal.some(p => p.r === r && p.c === c);
+    const isEngine = (isMyTurn && engineMove?.type === "step" && engineMove.r === r && engineMove.c === c);
+    
+    cell.classList.toggle("legal", isLegal);
+    cell.classList.toggle("engine", isEngine);
+  }
+  
+  updatePiecePositions(animatePieces);
+
+  for(const k of state.walls){
+    const [r,c,o] = k.split(",");
+    layer.appendChild(createWallPiece(+r, +c, o));
+  }
+  if(isMyTurn && engineMove?.type === "wall"){
+    layer.appendChild(createWallPiece(engineMove.r, engineMove.c, engineMove.o, "engine"));
+  }
+  updateUI();
+}
+
+function updateUI(){
+  document.getElementById("meWalls").textContent = state.me.walls;
+  document.getElementById("oppWalls").textContent = state.opp.walls;
+  document.getElementById("dockCount").textContent = state[state.turn].walls;
+  
+  const pMeEl = document.getElementById("pMe");
+  const pOppEl = document.getElementById("pOpp");
+  const oppColor = getOppColor();
+  
+  pMeEl.className = "player bottom-p is-" + myColorSetting + (state.turn === "me" ? " active" : "");
+  pOppEl.className = "player top-p is-" + oppColor + (state.turn === "opp" ? " active" : "");
+
+  document.getElementById("pMeBall").className = "ball " + myColorSetting;
+  document.getElementById("pOppBall").className = "ball " + oppColor;
+
+  document.getElementById("pMeName").textContent = "Ты (" + (myColorSetting === "blue" ? "Синий" : "Красный") + ")";
+  document.getElementById("pOppName").textContent = "Противник (" + (oppColor === "blue" ? "Синий" : "Красный") + ")";
+  
+  document.getElementById("glowBottom").classList.toggle("active", state.turn === "me");
+  document.getElementById("glowTop").classList.toggle("active", state.turn === "opp");
+
+  const firstTurnBadge = document.getElementById("firstTurnBadge");
+  if(firstTurnBadge){
+    firstTurnBadge.textContent = (firstTurnSetting === "me" ? "Ты" : "Противник");
+    firstTurnBadge.className = "turn-badge " + (firstTurnSetting === "me" ? "me" : "opp");
+  }
+
+  const colorBadge = document.getElementById("colorBadge");
+  if(colorBadge){
+    colorBadge.textContent = (myColorSetting === "blue" ? "Синий" : "Красный");
+    colorBadge.className = "turn-badge " + myColorSetting;
+  }
+
+  const racePosBtn = document.getElementById("racePosToggle");
+  const racePosBadge = document.getElementById("racePosBadge");
+  if(racePosBtn && racePosBadge){
+    racePosBtn.style.display = (gameMode === "race" ? "flex" : "none");
+    racePosBadge.textContent = (raceSideSetting === "right" ? "Справа" : "Слева");
+  }
+
+  const wallsBtn = document.getElementById("wallsToggle");
+  const wallsBadge = document.getElementById("wallsBadge");
+  if(wallsBtn && wallsBadge){
+    wallsBtn.style.display = (gameMode === "race" ? "flex" : "none");
+    wallsBadge.textContent = raceWallsSetting;
+  }
+
+  const modeLabel = document.getElementById("modeLabel");
+  if(modeLabel) modeLabel.textContent = (gameMode === "race" ? "Гонка 9×13" : "Дуэль 9×9");
+  
+  const finishBar = document.getElementById("finishBar");
+  if(finishBar) finishBar.classList.toggle("visible", gameMode === "race");
+
+  const isMyTurn = (state.turn === "me");
+  document.getElementById("apply").disabled = !(isMyTurn && engineMove && !state.gameOver);
+  document.querySelectorAll(".wall-tool").forEach(b => b.classList.toggle("active", b.dataset.orient === selectedWall));
+}
+
+function onCell(r,c){
+  if(state.gameOver) return;
+  if(legalMoves(state.turn).some(p => p.r === r && p.c === c)){
+    save(); state[state.turn].r = r; state[state.turn].c = c; playMoveSound(); finishTurn();
+  }
+}
+
+function placeWall(r,c,o){
+  if(state.gameOver || state[state.turn].walls <= 0 || !legalWall(r,c,o)) return false;
+  save(); state.walls.add(wallKey(r,c,o)); state[state.turn].walls--; playWallSound(); selectedWall = null; engineMove = null; finishTurn(); return true;
+}
+
+function finishTurn(){
+  const myGoal = getGoalRow("me");
+  const oppGoal = getGoalRow("opp");
+  const won = (state.me.r === myGoal) || (state.opp.r === oppGoal);
+  
+  if(won){
+    state.gameOver = true;
+    hideSearchPill();
+    render(true);
+    setTimeout(()=>alert(state.me.r === myGoal ? "Ты победил!" : "Противник победил!"), 20);
+    return;
+  }
+  state.turn = (state.turn === "me" ? "opp" : "me");
+  computeEngine();
+}
+
+function applyEngine(){
+  if(!engineMove || state.gameOver || state.turn !== "me") return;
+  save();
+  if(engineMove.type === "step"){
+    state[state.turn].r = engineMove.r; state[state.turn].c = engineMove.c; playMoveSound();
+  } else {
+    state.walls.add(wallKey(engineMove.r, engineMove.c, engineMove.o)); state[state.turn].walls--; playWallSound();
+  }
+  engineMove = null; finishTurn();
+}
+
+document.getElementById("apply").onclick = applyEngine;
+
+document.getElementById("undo").onclick = ()=>{
+  if(history.length) restore(history.pop());
+};
+
+document.getElementById("resign").onclick = ()=>{
+  if(confirm("Сбросить партию и начать заново?")){
+    state = initialState(); history = []; engineMove = null; selectedWall = null; computeEngine();
+  }
+};
+
+document.getElementById("modeToggle").onclick = ()=>{
+  gameMode = (gameMode === "duel" ? "race" : "duel");
+  try{ localStorage.setItem("wr-gamemode", gameMode); }catch(e){}
+  
+  const shell = document.getElementById("boardShell");
+  shell.className = "board-shell " + (gameMode === "race" ? "mode-race" : "mode-duel");
+  
+  currentRenderedRows = -1;
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+  
+  render(false);
+  computeEngine();
+};
+
+document.getElementById("firstTurnToggle").onclick = ()=>{
+  firstTurnSetting = (firstTurnSetting === "me" ? "opp" : "me");
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+  render(false);
+  computeEngine();
+};
+
+document.getElementById("colorToggle").onclick = ()=>{
+  myColorSetting = (myColorSetting === "blue" ? "red" : "blue");
+  try{ localStorage.setItem("wr-mycolor", myColorSetting); }catch(e){}
+  render(false);
+};
+
+document.getElementById("racePosToggle").onclick = ()=>{
+  raceSideSetting = (raceSideSetting === "right" ? "left" : "right");
+  try{ localStorage.setItem("wr-raceside", raceSideSetting); }catch(e){}
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+  render(false);
+  computeEngine();
+};
+
+document.getElementById("wallsToggle").onclick = ()=>{
+  raceWallsSetting = (raceWallsSetting === 15 ? 10 : 15);
+  try{ localStorage.setItem("wr-racewalls", raceWallsSetting); }catch(e){}
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+  render(false);
+  computeEngine();
+};
+
+function selectWall(o){ selectedWall = (selectedWall === o ? null : o); render(true); }
+document.getElementById("wallH").onclick = ()=>selectWall("h");
+document.getElementById("wallV").onclick = ()=>selectWall("v");
+
+function isPointerInsideBoard(pnt){
+  const rect = document.getElementById("boardShell").getBoundingClientRect();
+  return pnt.x >= rect.left - 15 && 
+         pnt.x <= rect.right + 15 && 
+         pnt.y >= rect.top - 15 && 
+         pnt.y <= rect.bottom + 15;
+}
+
+function boardAnchorFromPointer(x,y){
+  const rect = document.getElementById("boardShell").getBoundingClientRect();
+  const rows = getBoardRows();
+  const cellW = rect.width / 9;
+  const cellH = rect.height / rows;
+  
+  let col = Math.round((x - rect.left) / cellW) - 1;
+  let row = Math.round((y - rect.top) / cellH) - 1;
+  
+  col = Math.max(0, Math.min(7, col));
+  row = Math.max(0, Math.min(rows - 2, row));
+  return {r:row, c:col};
+}
+
+function dragPointer(x,y){ return {x:x, y:y-65}; }
+
+function updateGhost(x,y,o){
+  const pnt = dragPointer(x,y);
+  if(!isPointerInsideBoard(pnt)){
+    if(ghostEl){ ghostEl.remove(); ghostEl = null; }
+    ghostAnchor = null;
+    return;
+  }
+
+  const a = boardAnchorFromPointer(pnt.x, pnt.y);
+  if(!ghostEl){
+    ghostEl = createWallPiece(a.r, a.c, o, "ghost");
+    document.getElementById("wallLayer").appendChild(ghostEl);
+  }
+  
+  const p = wallPosition(a.r, a.c, o);
+  ghostEl.style.left = p.x + "px";
+  ghostEl.style.top = p.y + "px";
+  ghostEl.className = "wall-piece " + o + " ghost";
+  
+  const ok = state[state.turn].walls > 0 && legalWall(a.r, a.c, o);
+  if(!ok) ghostEl.classList.add("bad");
+  ghostAnchor = {...a, ok};
+}
+
+function endDrag(x,y){
+  if(!dragging) return;
+  const pnt = dragPointer(x,y);
+  const inside = isPointerInsideBoard(pnt);
+  
+  dragging = false;
+  if(ghostEl){ ghostEl.remove(); ghostEl = null; }
+  
+  if(inside){
+    const a = boardAnchorFromPointer(pnt.x, pnt.y);
+    const ok = state[state.turn].walls > 0 && legalWall(a.r, a.c, dragOrient);
+    if(ok) placeWall(a.r, a.c, dragOrient);
+  }
+  
+  ghostAnchor = null;
+  dragOrient = null;
+  selectedWall = null;
+  render(true);
+}
+
+function bindWallDrag(btn){
+  btn.addEventListener("pointerdown", e=>{
+    if(state.gameOver || state[state.turn].walls <= 0) return;
+    dragging = true; dragOrient = btn.dataset.orient; selectedWall = dragOrient;
+    btn.setPointerCapture?.(e.pointerId);
+    updateGhost(e.clientX, e.clientY, dragOrient);
+    e.preventDefault(); e.stopPropagation();
+  });
+  btn.addEventListener("pointermove", e=>{
+    if(dragging) updateGhost(e.clientX, e.clientY, dragOrient);
+  });
+  btn.addEventListener("pointerup", e=>endDrag(e.clientX, e.clientY));
+  btn.addEventListener("pointercancel", ()=>endDrag(0,0));
+}
+bindWallDrag(document.getElementById("wallH"));
+bindWallDrag(document.getElementById("wallV"));
+
+document.getElementById("boardShell").addEventListener("pointermove", e=>{
+  if(dragging) updateGhost(e.clientX, e.clientY, dragOrient);
+});
+document.getElementById("boardShell").addEventListener("pointerup", e=>{ if(dragging) endDrag(e.clientX, e.clientY); });
+
+document.getElementById("boardShell").addEventListener("click", e=>{
+  if(dragging || !selectedWall) return;
+  const a = boardAnchorFromPointer(e.clientX, e.clientY);
+  if(legalWall(a.r, a.c, selectedWall)) placeWall(a.r, a.c, selectedWall);
+});
+
+function sfx(freq,dur,type="sine",vol=.035){
+  if(!soundOn) return;
+  try{
+    audio ||= new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, audio.currentTime);
+    g.gain.setValueAtTime(vol, audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001, audio.currentTime + dur);
+    o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + dur);
+  }catch(e){}
+}
+function playMoveSound(){ sfx(430, .11, "sine", .035); setTimeout(()=>sfx(650, .08, "sine", .025), 35); }
+function playWallSound(){ sfx(100, .07, "square", .03); }
+
+const modal = document.getElementById("modal");
+document.getElementById("settings").onclick = ()=>modal.classList.add("open");
+document.getElementById("close").onclick = ()=>modal.classList.remove("open");
+modal.onclick = e=>{ if(e.target === modal) modal.classList.remove("open"); };
+
+document.getElementById("soundSwitch").onclick = ()=>{
+  soundOn = !soundOn;
+  document.getElementById("soundSwitch").classList.toggle("on", soundOn);
+  try{ localStorage.setItem("wr-sound", soundOn ? "on" : "off"); }catch(e){}
+};
+function setTheme(t){
+  theme = t; document.body.classList.toggle("light", t === "light");
+  document.getElementById("darkBtn").classList.toggle("active", t === "dark");
+  document.getElementById("lightBtn").classList.toggle("active", t === "light");
+  try{ localStorage.setItem("wr-theme", t); }catch(e){}
+}
+document.getElementById("darkBtn").onclick = ()=>setTheme("dark");
+document.getElementById("lightBtn").onclick = ()=>setTheme("light");
+
+window.addEventListener("resize", ()=>{ render(false); });
+
+try{
+  theme = localStorage.getItem("wr-theme") || "dark";
+  soundOn = localStorage.getItem("wr-sound") !== "off";
+  gameMode = localStorage.getItem("wr-gamemode") || "duel";
+  raceWallsSetting = parseInt(localStorage.getItem("wr-racewalls") || "15", 10);
+  raceSideSetting = localStorage.getItem("wr-raceside") || "right";
+  myColorSetting = localStorage.getItem("wr-mycolor") || "blue";
+}catch(e){}
+setTheme(theme);
+document.getElementById("soundSwitch").classList.toggle("on", soundOn);
+
+const shellInit = document.getElementById("boardShell");
+shellInit.className = "board-shell " + (gameMode === "race" ? "mode-race" : "mode-duel");
+const finishBarInit = document.getElementById("finishBar");
+if(finishBarInit) finishBarInit.classList.toggle("visible", gameMode === "race");
+
+// ============================================================
+// МОСТ К ДВИЖКУ В WEB WORKER (engine.worker.js)
+// ============================================================
+const nativeEngineWorker = new Worker("engine.worker.js");
+let nativeSearchId = 0;
+const searchPill = document.getElementById("engineSearchPill");
+const searchPillSub = document.getElementById("engineSearchSub");
+
+function showSearchPill(){
+  searchPill.classList.add("show");
+  searchPillSub.textContent = gameMode === "race" ? "гонка 9×13" : "дуэль 9×9";
+}
+function hideSearchPill(){
+  searchPill.classList.remove("show");
+}
+
+function wallMasksFromState(){
+  let h0=0,h1=0,h2=0,h3=0,v0=0,v1=0,v2=0,v3=0;
+  for(const key of state.walls){
+    const [rs,cs,o]=key.split(",");
+    const idx=(+rs)*8+(+cs);
+    if(idx<0 || idx>=128) continue;
+    const bit=1 << (idx & 31);
+    const bank=idx>>5;
+    if(o==="h") { if(bank===0)h0|=bit; else if(bank===1)h1|=bit; else if(bank===2)h2|=bit; else h3|=bit; }
+    else { if(bank===0)v0|=bit; else if(bank===1)v1|=bit; else if(bank===2)v2|=bit; else v3|=bit; }
+  }
+  return {h0:h0>>>0,h1:h1>>>0,h2:h2>>>0,h3:h3>>>0,v0:v0>>>0,v1:v1>>>0,v2:v2>>>0,v3:v3>>>0};
+}
+
+function requestNativeEngine(){
+  if(state.gameOver || state.turn !== "me"){
+    hideSearchPill();
+    render(true);
+    return;
+  }
+  const id = ++nativeSearchId;
+  engineMove = null;
+  showSearchPill();
+  render(true);
+  nativeEngineWorker.postMessage({
+    type: "search",
+    id,
+    rows: getBoardRows(),
+    my: {r: state.me.r, c: state.me.c, walls: state.me.walls},
+    opp: {r: state.opp.r, c: state.opp.c, walls: state.opp.walls},
+    walls: wallMasksFromState(),
+    wallList: Array.from(state.walls),
+    timeMs: 1600,
+    maxDepth: 14
+  });
+}
+
+nativeEngineWorker.onmessage = (ev)=>{
+  const d = ev.data || {};
+  if(d.type === "ready"){
+    if(state && state.turn === "me" && !state.gameOver) requestNativeEngine();
+    return;
+  }
+  if(d.type === "error"){
+    hideSearchPill();
+    console.error("Engine error:", d.message);
+    render(true);
+    return;
+  }
+  if(d.type !== "result" || d.id !== nativeSearchId) return;
+  hideSearchPill();
+  if(!state.gameOver && state.turn === "me" && d.move){
+    const mType = (d.move.type === 0 || d.move.type === "step") ? "step" : "wall";
+    engineMove = {type: mType, r: d.move.r, c: d.move.c};
+    if(mType === "wall") engineMove.o = (d.move.o === 0 || d.move.o === "h") ? "h" : "v";
+    engineStats = {nodes:d.nodes||0, depth:d.depth||0, elapsed:d.elapsed||0, ttHits:d.ttHits||0, cutoffs:d.cutoffs||0};
+  } else {
+    engineMove = null;
+  }
+  render(true);
+};
+
+function computeEngine(){
+  if(state.gameOver){ hideSearchPill(); render(true); return; }
+  if(state.turn === "me") requestNativeEngine();
+  else { engineMove = null; hideSearchPill(); render(true); }
+}
+
+state = initialState();
+render(false);
+computeEngine();
+</script>
+</body>
+</html>
