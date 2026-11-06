@@ -1,14 +1,17 @@
 "use strict";
 
 // ============================================================================
-// WALLHACK GRANDMASTER ENGINE WORKER (WASM + EXACT NEMESIS/CAGE-PROBE JS CORE)
+// EXACT 1-TO-1 PORT OF NEMESIS (gorisanson/quoridor-ai v0.3 UCT MCTS)
+// - Runs Native C++ WASM 60,000 Rollouts if engine.wasm is compiled
+// - Otherwise runs Exact JS UCT MCTS (uctConst = 0.2, A = 0.7 rollout policy,
+//   Robust Child selection by max visit count, 2-point connectivity filter)
 // ============================================================================
 
 let wasmSearchFn = null;
 let wasmNodesFn = null;
 let wasmDepthFn = null;
 let wasmReady = false;
-let engineType = "js";
+let engineType = "js-mcts";
 
 try {
   importScripts("engine.js");
@@ -30,139 +33,93 @@ try {
       engineType = "wasm";
       self.postMessage({ type: "ready", engine: "wasm" });
     }).catch(function () {
-      engineType = "js";
-      self.postMessage({ type: "ready", engine: "js" });
+      self.postMessage({ type: "ready", engine: "js-mcts" });
     });
   } else {
-    self.postMessage({ type: "ready", engine: "js" });
+    self.postMessage({ type: "ready", engine: "js-mcts" });
   }
 } catch (e) {
-  self.postMessage({ type: "ready", engine: "js" });
+  self.postMessage({ type: "ready", engine: "js-mcts" });
+}
+
+function now() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+
+function packMove(type, r, c, o) {
+  return (type & 1) | ((o & 1) << 1) | ((r & 15) << 2) | ((c & 15) << 6);
+}
+
+function unpackMove(code) {
+  return {
+    type: code & 1,
+    o: (code >>> 1) & 1,
+    r: (code >>> 2) & 15,
+    c: (code >>> 6) & 15
+  };
 }
 
 let boardRows = 9;
 let boardCols = 9;
 let isRaceMode = false;
 let isQuadMode = false;
-let deadline = 0;
-let timedOut = false;
-let nodes = 0;
-let ttHits = 0;
-let cutoffs = 0;
-let completedDepth = 0;
 
-const hWalls = new Uint8Array(169);
-const vWalls = new Uint8Array(169);
-let myR = 8, myC = 4, oppR = 0, oppC = 4;
-let myWalls = 10, oppWalls = 10;
-let totalWallsPlaced = 0;
-let wHashLo = 0, wHashHi = 0;
+let rngState = 0x13579BDF;
+function fastRand() {
+  let x = rngState | 0;
+  x ^= x << 13;
+  x ^= x >>> 17;
+  x ^= x << 5;
+  rngState = x;
+  return x >>> 0;
+}
+function fastRand01() {
+  return (fastRand() & 0xFFFFFF) / 16777216.0;
+}
 
-const Z_HWALL_LO = new Uint32Array(169);
-const Z_HWALL_HI = new Uint32Array(169);
-const Z_VWALL_LO = new Uint32Array(169);
-const Z_VWALL_HI = new Uint32Array(169);
-const Z_ME_LO = new Uint32Array(169);
-const Z_ME_HI = new Uint32Array(169);
-const Z_OPP_LO = new Uint32Array(169);
-const Z_OPP_HI = new Uint32Array(169);
-const Z_MW_LO = new Uint32Array(20);
-const Z_MW_HI = new Uint32Array(20);
-const Z_OW_LO = new Uint32Array(20);
-const Z_OW_HI = new Uint32Array(20);
-
-(function initZobristJS() {
-  let seed = 0x9e3779b9;
-  function rand32() {
-    seed |= 0;
-    seed = (seed + 0x6d2b79f5) | 0;
-    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return (t ^ (t >>> 14)) >>> 0;
-  }
-  for (let i = 0; i < 169; i++) {
-    Z_HWALL_LO[i] = rand32(); Z_HWALL_HI[i] = rand32();
-    Z_VWALL_LO[i] = rand32(); Z_VWALL_HI[i] = rand32();
-    Z_ME_LO[i] = rand32();    Z_ME_HI[i] = rand32();
-    Z_OPP_LO[i] = rand32();   Z_OPP_HI[i] = rand32();
-  }
-  for (let i = 0; i < 20; i++) {
-    Z_MW_LO[i] = rand32(); Z_MW_HI[i] = rand32();
-    Z_OW_LO[i] = rand32(); Z_OW_HI[i] = rand32();
-  }
-})();
-
-const WALL_VALUE_TABLE = new Int32Array([
-  0, 1450, 2700, 3800, 4800, 5720, 6580, 7390, 8150, 8860, 9500, 10100, 10680, 11240, 11780, 12300
-]);
-
-const TT_SIZE = 65536;
-const TT_MASK = TT_SIZE - 1;
-const ttKeyLo = new Uint32Array(TT_SIZE);
-const ttKeyHi = new Uint32Array(TT_SIZE);
-const ttScore = new Int32Array(TT_SIZE);
-const ttDepth = new Int8Array(TT_SIZE);
-const ttFlag = new Uint8Array(TT_SIZE);
-const ttBestMove = new Uint16Array(TT_SIZE);
-
+const DR = [-1, 1, 0, 0];
+const DC = [0, 0, -1, 1];
 const bfsQ = new Int16Array(256);
-const distMe = new Int8Array(169);
-const waysMe = new Int16Array(169);
-const exitsMe = new Uint8Array(169);
-const distOpp = new Int8Array(169);
-const waysOpp = new Int16Array(169);
-const exitsOpp = new Uint8Array(169);
-const distCenter11 = new Int8Array(121);
+const dMap0 = new Int8Array(169);
+const dMap1 = new Int8Array(169);
+const visBuf = new Uint8Array(169);
 
-const killer = Array.from({ length: 64 }, () => [0, 0]);
-const counterMoves = [new Uint16Array(2048), new Uint16Array(2048)];
-const history = [new Int32Array(2048), new Int32Array(2048)];
-
-const MAX_PLY = 64;
-const plyMoveCodes = Array.from({ length: MAX_PLY }, () => new Int32Array(96));
-const plyMovePrios = Array.from({ length: MAX_PLY }, () => new Int32Array(96));
-const tempWallCodes = new Int32Array(256);
-const tempWallPrios = new Int32Array(256);
-const stepBuf = new Int32Array(12);
-
-function now() {
-  return typeof performance !== "undefined" ? performance.now() : Date.now();
+function goalRowOf(side) {
+  if (isRaceMode) return 0;
+  return side === 0 ? 0 : (boardRows - 1);
 }
 
-function canUp(r, c) {
+function canUpB(hWalls, r, c) {
   if (r <= 0) return false;
-  const maxW = boardCols - 1;
-  const base = (r - 1) * maxW;
-  return (c >= maxW || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
+  const wC = boardCols - 1;
+  const base = (r - 1) * wC;
+  return (c >= wC || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
 }
-function canDown(r, c) {
+function canDownB(hWalls, r, c) {
   if (r >= boardRows - 1) return false;
-  const maxW = boardCols - 1;
-  const base = r * maxW;
-  return (c >= maxW || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
+  const wC = boardCols - 1;
+  const base = r * wC;
+  return (c >= wC || hWalls[base + c] === 0) && (c <= 0 || hWalls[base + c - 1] === 0);
 }
-function canLeft(r, c) {
+function canLeftB(vWalls, r, c) {
   if (c <= 0) return false;
-  const maxW = boardCols - 1;
-  const col = c - 1;
-  return (r >= boardRows - 1 || vWalls[r * maxW + col] === 0) && (r <= 0 || vWalls[(r - 1) * maxW + col] === 0);
+  const wC = boardCols - 1;
+  return (r >= boardRows - 1 || vWalls[r * wC + c - 1] === 0) && (r <= 0 || vWalls[(r - 1) * wC + c - 1] === 0);
 }
-function canRight(r, c) {
-  const maxW = boardCols - 1;
-  if (c >= maxW) return false;
-  return (r >= boardRows - 1 || vWalls[r * maxW + c] === 0) && (r <= 0 || vWalls[(r - 1) * maxW + c] === 0);
+function canRightB(vWalls, r, c) {
+  const wC = boardCols - 1;
+  if (c >= wC) return false;
+  return (r >= boardRows - 1 || vWalls[r * wC + c] === 0) && (r <= 0 || vWalls[(r - 1) * wC + c] === 0);
 }
-
-function canStepDir(r, c, dir) {
-  if (dir === 0) return canUp(r, c);
-  if (dir === 1) return canDown(r, c);
-  if (dir === 2) return canLeft(r, c);
-  return canRight(r, c);
+function canStepDirB(hWalls, vWalls, r, c, d) {
+  if (d === 0) return canUpB(hWalls, r, c);
+  if (d === 1) return canDownB(hWalls, r, c);
+  if (d === 2) return canLeftB(vWalls, r, c);
+  return canRightB(vWalls, r, c);
 }
 
-function wallGeometryLegal(r, c, o) {
-  const maxR = boardRows - 2;
-  const maxC = boardCols - 2;
+function wallGeometryLegalB(hWalls, vWalls, r, c, o) {
+  const maxR = boardRows - 2, maxC = boardCols - 2;
   if (r < 0 || r > maxR || c < 0 || c > maxC) return false;
   const stride = boardCols - 1;
   const idx = r * stride + c;
@@ -177,611 +134,469 @@ function wallGeometryLegal(r, c, o) {
   }
 }
 
-// Точный трафарет setWallsBesidePawn + adjustProbableValidNextWall из game.js (Nemesis)
-function isNemesisProbableWall(r, c, o, pR, pC, eR, eC) {
+// Exact testIfConnectedOnTwoPoints from gorisanson/quoridor-ai game.js
+function isConnectedOnTwoPointsB(hWalls, vWalls, r, c, o) {
   const stride = boardCols - 1;
-  const maxR = boardRows - 2;
-  const maxC = boardCols - 2;
-
+  const maxR = boardRows - 2, maxC = boardCols - 2;
   if (o === 0) {
-    if ((r === eR - 1 || r === eR) && c >= eC - 2 && c <= eC + 1) return true;
-    if ((r === pR - 1 || r === pR) && c >= pC - 2 && c <= pC + 1) return true;
-    if (c === 0 || c === maxC) return true;
-  } else {
-    if ((c === eC - 1 || c === eC) && r >= eR - 2 && r <= eR + 1) return true;
-    if ((c === pC - 1 || c === pC) && r >= pR - 2 && r <= pR + 1) return true;
-  }
-
-  if (totalWallsPlaced > 0) {
-    if (o === 0) {
-      if (c >= 2 && hWalls[r * stride + (c - 2)]) return true;
-      if (c + 2 <= maxC && hWalls[r * stride + (c + 2)]) return true;
-      if (c >= 3 && hWalls[r * stride + (c - 3)]) return true;
-      if (c + 3 <= maxC && hWalls[r * stride + (c + 3)]) return true;
-    } else {
-      if (r >= 2 && vWalls[(r - 2) * stride + c]) return true;
-      if (r + 2 <= maxR && vWalls[(r + 2) * stride + c]) return true;
-      if (r >= 3 && vWalls[(r - 3) * stride + c]) return true;
-      if (r + 3 <= maxR && vWalls[(r + 3) * stride + c]) return true;
+    let left = (c === 0);
+    if (!left && c >= 1) {
+      if (vWalls[r * stride + (c - 1)] ||
+          (r >= 1 && vWalls[(r - 1) * stride + (c - 1)]) ||
+          (r < maxR && vWalls[(r + 1) * stride + (c - 1)]) ||
+          (c >= 2 && hWalls[r * stride + (c - 2)])) left = true;
     }
-    for (let dr = -2; dr <= 2; dr++) {
-      for (let dc = -2; dc <= 2; dc++) {
-        const nr = r + dr, nc = c + dc;
-        if (nr >= 0 && nr <= maxR && nc >= 0 && nc <= maxC) {
-          const nIdx = nr * stride + nc;
-          if (hWalls[nIdx] || vWalls[nIdx]) return true;
-        }
-      }
+    let right = (c === maxC);
+    if (!right && c < maxC) {
+      if (vWalls[r * stride + (c + 1)] ||
+          (r >= 1 && vWalls[(r - 1) * stride + (c + 1)]) ||
+          (r < maxR && vWalls[(r + 1) * stride + (c + 1)]) ||
+          (c + 2 <= maxC && hWalls[r * stride + (c + 2)])) right = true;
     }
-  }
-  return false;
-}
-
-function placeWallFast(r, c, o) {
-  const idx = r * (boardCols - 1) + c;
-  if (o === 0) {
-    hWalls[idx] = 1;
-    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
+    const middle = (r >= 1 && vWalls[(r - 1) * stride + c]) || (r < maxR && vWalls[(r + 1) * stride + c]);
+    return (left && right) || (right && middle) || (middle && left);
   } else {
-    vWalls[idx] = 1;
-    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
+    let top = (r === 0);
+    if (!top && r >= 1) {
+      if (hWalls[(r - 1) * stride + c] ||
+          (c >= 1 && hWalls[(r - 1) * stride + (c - 1)]) ||
+          (c < maxC && hWalls[(r - 1) * stride + (c + 1)]) ||
+          (r >= 2 && vWalls[(r - 2) * stride + c])) top = true;
+    }
+    let bottom = (r === maxR);
+    if (!bottom && r < maxR) {
+      if (hWalls[(r + 1) * stride + c] ||
+          (c >= 1 && hWalls[(r + 1) * stride + (c - 1)]) ||
+          (c < maxC && hWalls[(r + 1) * stride + (c + 1)]) ||
+          (r + 2 <= maxR && vWalls[(r + 2) * stride + c])) bottom = true;
+    }
+    const middle = (c >= 1 && hWalls[r * stride + (c - 1)]) || (c < maxC && hWalls[r * stride + (c + 1)]);
+    return (top && bottom) || (bottom && middle) || (middle && top);
   }
-  totalWallsPlaced++;
 }
 
-function removeWallFast(r, c, o) {
-  const idx = r * (boardCols - 1) + c;
-  if (o === 0) {
-    hWalls[idx] = 0;
-    wHashLo = (wHashLo ^ Z_HWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_HWALL_HI[idx]) >>> 0;
-  } else {
-    vWalls[idx] = 0;
-    wHashLo = (wHashLo ^ Z_VWALL_LO[idx]) >>> 0;
-    wHashHi = (wHashHi ^ Z_VWALL_HI[idx]) >>> 0;
-  }
-  totalWallsPlaced--;
-}
-
-function computeGoalMetrics(goalRow, outDist, outWays, outExits) {
+function computeDistToGoal(hWalls, vWalls, goalRow, outDist) {
   const total = boardRows * boardCols;
   outDist.fill(-1, 0, total);
-  outWays.fill(0, 0, total);
-  outExits.fill(0, 0, total);
-
   let head = 0, tail = 0;
-  const baseGoal = goalRow * boardCols;
+  const base = goalRow * boardCols;
   for (let c = 0; c < boardCols; c++) {
-    const idx = baseGoal + c;
-    outDist[idx] = 0;
-    outWays[idx] = 1;
-    bfsQ[tail++] = idx;
+    outDist[base + c] = 0;
+    bfsQ[tail++] = base + c;
   }
-
   while (head < tail) {
     const idx = bfsQ[head++];
     const r = (idx / boardCols) | 0;
     const c = idx - r * boardCols;
     const nd = outDist[idx] + 1;
-    const w = outWays[idx];
-
-    if (canUp(r, c)) {
-      const ni = idx - boardCols;
-      if (outDist[ni] === -1) { outDist[ni] = nd; outWays[ni] = w; bfsQ[tail++] = ni; }
-      else if (outDist[ni] === nd) { outWays[ni] = Math.min(4096, outWays[ni] + w); }
-    }
-    if (canDown(r, c)) {
-      const ni = idx + boardCols;
-      if (outDist[ni] === -1) { outDist[ni] = nd; outWays[ni] = w; bfsQ[tail++] = ni; }
-      else if (outDist[ni] === nd) { outWays[ni] = Math.min(4096, outWays[ni] + w); }
-    }
-    if (canLeft(r, c)) {
-      const ni = idx - 1;
-      if (outDist[ni] === -1) { outDist[ni] = nd; outWays[ni] = w; bfsQ[tail++] = ni; }
-      else if (outDist[ni] === nd) { outWays[ni] = Math.min(4096, outWays[ni] + w); }
-    }
-    if (canRight(r, c)) {
-      const ni = idx + 1;
-      if (outDist[ni] === -1) { outDist[ni] = nd; outWays[ni] = w; bfsQ[tail++] = ni; }
-      else if (outDist[ni] === nd) { outWays[ni] = Math.min(4096, outWays[ni] + w); }
-    }
+    if (canUpB(hWalls, r, c) && outDist[idx - boardCols] === -1) { outDist[idx - boardCols] = nd; bfsQ[tail++] = idx - boardCols; }
+    if (canDownB(hWalls, r, c) && outDist[idx + boardCols] === -1) { outDist[idx + boardCols] = nd; bfsQ[tail++] = idx + boardCols; }
+    if (canLeftB(vWalls, r, c) && outDist[idx - 1] === -1) { outDist[idx - 1] = nd; bfsQ[tail++] = idx - 1; }
+    if (canRightB(vWalls, r, c) && outDist[idx + 1] === -1) { outDist[idx + 1] = nd; bfsQ[tail++] = idx + 1; }
   }
+}
 
-  for (let idx = 0; idx < total; idx++) {
-    const d = outDist[idx];
-    if (d <= 0) continue;
+function hasPathToGoal(hWalls, vWalls, startR, startC, goalRow) {
+  const total = boardRows * boardCols;
+  visBuf.fill(0, 0, total);
+  let head = 0, tail = 0;
+  const startIdx = startR * boardCols + startC;
+  visBuf[startIdx] = 1;
+  bfsQ[tail++] = startIdx;
+  while (head < tail) {
+    const idx = bfsQ[head++];
     const r = (idx / boardCols) | 0;
+    if (r === goalRow) return true;
     const c = idx - r * boardCols;
-    const target = d - 1;
-    let ex = 0;
-    if (canUp(r, c) && outDist[idx - boardCols] === target) ex++;
-    if (canDown(r, c) && outDist[idx + boardCols] === target) ex++;
-    if (canLeft(r, c) && outDist[idx - 1] === target) ex++;
-    if (canRight(r, c) && outDist[idx + 1] === target) ex++;
-    outExits[idx] = ex;
+    if (canUpB(hWalls, r, c) && !visBuf[idx - boardCols]) { visBuf[idx - boardCols] = 1; bfsQ[tail++] = idx - boardCols; }
+    if (canDownB(hWalls, r, c) && !visBuf[idx + boardCols]) { visBuf[idx + boardCols] = 1; bfsQ[tail++] = idx + boardCols; }
+    if (canLeftB(vWalls, r, c) && !visBuf[idx - 1]) { visBuf[idx - 1] = 1; bfsQ[tail++] = idx - 1; }
+    if (canRightB(vWalls, r, c) && !visBuf[idx + 1]) { visBuf[idx + 1] = 1; bfsQ[tail++] = idx + 1; }
   }
+  return false;
 }
 
-function updateDistMaps() {
-  computeGoalMetrics(0, distMe, waysMe, exitsMe);
-  if (isRaceMode) {
-    distOpp.set(distMe);
-    waysOpp.set(waysMe);
-    exitsOpp.set(exitsMe);
+function isWallLegalFull(st, r, c, o) {
+  if (!wallGeometryLegalB(st.hWalls, st.vWalls, r, c, o)) return false;
+  if (!isConnectedOnTwoPointsB(st.hWalls, st.vWalls, r, c, o)) return true;
+  const idx = r * (boardCols - 1) + c;
+  if (o === 0) st.hWalls[idx] = 1; else st.vWalls[idx] = 1;
+  const ok = hasPathToGoal(st.hWalls, st.vWalls, st.pR0, st.pC0, goalRowOf(0)) &&
+             hasPathToGoal(st.hWalls, st.vWalls, st.pR1, st.pC1, goalRowOf(1));
+  if (o === 0) st.hWalls[idx] = 0; else st.vWalls[idx] = 0;
+  return ok;
+}
+
+function isProbableWallNemesis(st, r, c, o) {
+  const maxR = boardRows - 2, maxC = boardCols - 2;
+  const stride = boardCols - 1;
+
+  if (o === 0) {
+    if ((r === st.pR0 - 1 || r === st.pR0) && c >= st.pC0 - 2 && c <= st.pC0 + 1) return true;
+    if ((r === st.pR1 - 1 || r === st.pR1) && c >= st.pC1 - 2 && c <= st.pC1 + 1) return true;
+    if (st.totalWalls >= 2 && (c === 0 || c === maxC)) return true;
   } else {
-    computeGoalMetrics(boardRows - 1, distOpp, waysOpp, exitsOpp);
+    if ((c === st.pC0 - 1 || c === st.pC0) && r >= st.pR0 - 2 && r <= st.pR0 + 1) return true;
+    if ((c === st.pC1 - 1 || c === st.pC1) && r >= st.pR1 - 2 && r <= st.pR1 + 1) return true;
   }
-}
 
-const DR = [-1, 1, 0, 0];
-const DC = [0, 0, -1, 1];
-
-function generatePawnStepsFast(pR, pC, oR, oC, outBuf) {
-  let cnt = 0;
-  for (let d = 0; d < 4; d++) {
-    if (!canStepDir(pR, pC, d)) continue;
-    const nr = pR + DR[d], nc = pC + DC[d];
-    if (nr === oR && nc === oC) {
-      if (canStepDir(oR, oC, d)) {
-        outBuf[cnt++] = (oR + DR[d]) * boardCols + (oC + DC[d]);
-      } else {
-        if (d < 2) {
-          if (canLeft(oR, oC)) outBuf[cnt++] = oR * boardCols + (oC - 1);
-          if (canRight(oR, oC)) outBuf[cnt++] = oR * boardCols + (oC + 1);
-        } else {
-          if (canUp(oR, oC)) outBuf[cnt++] = (oR - 1) * boardCols + oC;
-          if (canDown(oR, oC)) outBuf[cnt++] = (oR + 1) * boardCols + oC;
+  if (st.totalWalls > 0) {
+    if (o === 0) {
+      if (c >= 2 && st.hWalls[r * stride + (c - 2)]) return true;
+      if (c + 2 <= maxC && st.hWalls[r * stride + (c + 2)]) return true;
+      if (c >= 3 && st.hWalls[r * stride + (c - 3)]) return true;
+      if (c + 3 <= maxC && st.hWalls[r * stride + (c + 3)]) return true;
+      for (let dr = -2; dr <= 2; dr++) {
+        const nr = r + dr;
+        if (nr < 0 || nr > maxR) continue;
+        for (let dc = -1; dc <= 1; dc++) {
+          const nc = c + dc;
+          if (nc >= 0 && nc <= maxC && st.vWalls[nr * stride + nc]) return true;
         }
       }
     } else {
-      outBuf[cnt++] = nr * boardCols + nc;
+      if (r >= 2 && st.vWalls[(r - 2) * stride + c]) return true;
+      if (r + 2 <= maxR && st.vWalls[(r + 2) * stride + c]) return true;
+      if (r >= 3 && st.vWalls[(r - 3) * stride + c]) return true;
+      if (r + 3 <= maxR && st.vWalls[(r + 3) * stride + c]) return true;
+      for (let dr = -1; dr <= 1; dr++) {
+        const nr = r + dr;
+        if (nr < 0 || nr > maxR) continue;
+        for (let dc = -2; dc <= 2; dc++) {
+          const nc = c + dc;
+          if (nc >= 0 && nc <= maxC && st.hWalls[nr * stride + nc]) return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+const stepOutBuf = new Int32Array(12);
+function generatePawnStepsB(st, side) {
+  const pR = side === 0 ? st.pR0 : st.pR1;
+  const pC = side === 0 ? st.pC0 : st.pC1;
+  const oR = side === 0 ? st.pR1 : st.pR0;
+  const oC = side === 0 ? st.pC1 : st.pC0;
+  let cnt = 0;
+  for (let d = 0; d < 4; d++) {
+    if (!canStepDirB(st.hWalls, st.vWalls, pR, pC, d)) continue;
+    const nr = pR + DR[d], nc = pC + DC[d];
+    if (nr === oR && nc === oC) {
+      if (canStepDirB(st.hWalls, st.vWalls, oR, oC, d)) {
+        stepOutBuf[cnt++] = (oR + DR[d]) * boardCols + (oC + DC[d]);
+      } else {
+        if (d < 2) {
+          if (canLeftB(st.vWalls, oR, oC)) stepOutBuf[cnt++] = oR * boardCols + (oC - 1);
+          if (canRightB(st.vWalls, oR, oC)) stepOutBuf[cnt++] = oR * boardCols + (oC + 1);
+        } else {
+          if (canUpB(st.hWalls, oR, oC)) stepOutBuf[cnt++] = (oR - 1) * boardCols + oC;
+          if (canDownB(st.hWalls, oR, oC)) stepOutBuf[cnt++] = (oR + 1) * boardCols + oC;
+        }
+      }
+    } else {
+      stepOutBuf[cnt++] = nr * boardCols + nc;
     }
   }
   return cnt;
 }
 
-function evaluate2P(sideToMoveIsMe) {
-  const oppGoal = isRaceMode ? 0 : boardRows - 1;
-  if (myR === 0) return sideToMoveIsMe ? 100000 : -100000;
-  if (oppR === oppGoal) return sideToMoveIsMe ? -100000 : 100000;
-
-  updateDistMaps();
-  const myIdx = myR * boardCols + myC;
-  const oppIdx = oppR * boardCols + oppC;
-  const myDist = distMe[myIdx];
-  const oppDist = distOpp[oppIdx];
-
-  if (myDist < 0) return sideToMoveIsMe ? -100000 : 100000;
-  if (oppDist < 0) return sideToMoveIsMe ? 100000 : -100000;
-
-  if (myWalls === 0 && oppWalls === 0) {
-    let diff = (oppDist - myDist);
-    let s = diff * 1000 + (sideToMoveIsMe ? 500 : -500);
-    s += (myDist < oppDist || (myDist === oppDist && sideToMoveIsMe)) ? 25000 : -25000;
-    return sideToMoveIsMe ? s : -s;
-  }
-
-  let score = (oppDist - myDist) * 1000 + (sideToMoveIsMe ? 500 : -500);
-
-  const minDist = Math.min(myDist, oppDist);
-  const wallScale = minDist <= 2 ? 0.45 : (minDist <= 4 ? 0.72 : 1.0);
-  const mw = Math.min(15, Math.max(0, myWalls));
-  const ow = Math.min(15, Math.max(0, oppWalls));
-  score += ((WALL_VALUE_TABLE[mw] - WALL_VALUE_TABLE[ow]) * wallScale) | 0;
-
-  score += (exitsMe[myIdx] - exitsOpp[oppIdx]) * 170;
-  if (exitsOpp[oppIdx] === 1 && myWalls > 0) score += 410;
-  if (exitsMe[myIdx] === 1 && oppWalls > 0) score -= 420;
-
-  return sideToMoveIsMe ? score : -score;
-}
-
-function packMove(type, r, c, o) {
-  return (type & 1) | ((o & 1) << 1) | ((r & 15) << 2) | ((c & 15) << 6);
-}
-function unpackMove(code) {
+function cloneState(st) {
   return {
-    type: code & 1,
-    o: (code >>> 1) & 1,
-    r: (code >>> 2) & 15,
-    c: (code >>> 6) & 15
+    hWalls: new Uint8Array(st.hWalls),
+    vWalls: new Uint8Array(st.vWalls),
+    pR0: st.pR0, pC0: st.pC0, pW0: st.pW0,
+    pR1: st.pR1, pC1: st.pC1, pW1: st.pW1,
+    turn: st.turn,
+    totalWalls: st.totalWalls
   };
 }
 
-function sortSubArray(codes, prios, count) {
-  for (let i = 1; i < count; i++) {
-    const c = codes[i], p = prios[i];
-    let j = i - 1;
-    while (j >= 0 && prios[j] < p) {
-      codes[j + 1] = codes[j];
-      prios[j + 1] = prios[j];
-      j--;
-    }
-    codes[j + 1] = c;
-    prios[j + 1] = p;
+function applyMoveState(st, code) {
+  const mType = code & 1;
+  const mO = (code >>> 1) & 1;
+  const mR = (code >>> 2) & 15;
+  const mC = (code >>> 6) & 15;
+  if (mType === 0) {
+    if (st.turn === 0) { st.pR0 = mR; st.pC0 = mC; }
+    else { st.pR1 = mR; st.pC1 = mC; }
+  } else {
+    const idx = mR * (boardCols - 1) + mC;
+    if (mO === 0) st.hWalls[idx] = 1; else st.vWalls[idx] = 1;
+    if (st.turn === 0) st.pW0--; else st.pW1--;
+    st.totalWalls++;
   }
+  st.turn = 1 - st.turn;
 }
 
-function generateMoves2P(isMe, ply, ttBestCode, prevMove, qSearchOnly) {
-  const pR = isMe ? myR : oppR;
-  const pC = isMe ? myC : oppC;
-  const eR = isMe ? oppR : myR;
-  const eC = isMe ? oppC : myC;
-  const pWalls = isMe ? myWalls : oppWalls;
-  const eWalls = isMe ? oppWalls : myWalls;
-  const pGoal = isMe ? 0 : (isRaceMode ? 0 : boardRows - 1);
-  const sideIdx = isMe ? 0 : 1;
+function getExpansionMoves(st) {
+  const s = st.turn;
+  const opp = 1 - s;
+  const gMy = goalRowOf(s);
+  const gOpp = goalRowOf(opp);
 
-  updateDistMaps();
-  const pDist = isMe ? distMe : distOpp;
-  const eDist = isMe ? distOpp : distMe;
+  computeDistToGoal(st.hWalls, st.vWalls, gMy, dMap0);
+  computeDistToGoal(st.hWalls, st.vWalls, gOpp, dMap1);
 
-  const pIdx = pR * boardCols + pC;
-  const eIdx = eR * boardCols + eC;
-  const curP = pDist[pIdx];
-  const curE = eDist[eIdx];
+  const myR = s === 0 ? st.pR0 : st.pR1, myC = s === 0 ? st.pC0 : st.pC1;
+  const oppR = s === 0 ? st.pR1 : st.pR0, oppC = s === 0 ? st.pC1 : st.pC0;
+  const myW = s === 0 ? st.pW0 : st.pW1, oppW = s === 0 ? st.pW1 : st.pW0;
 
-  const cm = prevMove >= 0 ? counterMoves[sideIdx][prevMove & 2047] : 0;
-  const outCodes = plyMoveCodes[ply];
-  const outPrios = plyMovePrios[ply];
-  let moveCount = 0;
+  const curMyD = dMap0[myR * boardCols + myC];
+  const curOppD = dMap1[oppR * boardCols + oppC];
 
-  const nSteps = generatePawnStepsFast(pR, pC, eR, eC, stepBuf);
+  const moves = [];
+  const nSteps = generatePawnStepsB(st, s);
+  let bestStepD = 999;
   for (let i = 0; i < nSteps; i++) {
-    const cell = stepBuf[i];
+    const cell = stepOutBuf[i];
     const sr = (cell / boardCols) | 0;
-    const sc = cell - sr * boardCols;
-    const code = packMove(0, sr, sc, 0);
-    if (sr === pGoal) {
-      outCodes[0] = code;
-      return 1;
-    }
-    const newD = pDist[cell];
-    const stepGain = curP - newD;
-    if (qSearchOnly && stepGain < 2 && newD > 1) continue;
-
-    let prio = stepGain * 16000 + history[sideIdx][code];
-    if (code === ttBestCode) prio += 60000000;
-    if (code === cm) prio += 15000;
-    outCodes[moveCount] = code;
-    outPrios[moveCount] = prio;
-    moveCount++;
+    if (sr === gMy) return [packMove(0, sr, cell % boardCols, 0)];
+    if (dMap0[cell] >= 0 && dMap0[cell] < bestStepD) bestStepD = dMap0[cell];
   }
 
-  if (pWalls <= 0) {
-    sortSubArray(outCodes, outPrios, moveCount);
-    return moveCount;
+  for (let i = 0; i < nSteps; i++) {
+    const cell = stepOutBuf[i];
+    if (oppW === 0 && dMap0[cell] > bestStepD) continue;
+    moves.push(packMove(0, (cell / boardCols) | 0, cell % boardCols, 0));
   }
 
-  const maxR = boardRows - 2;
-  const maxC = boardCols - 2;
-  let wCount = 0;
+  if (myW <= 0) return moves;
+  if (oppW === 0 && curMyD <= curOppD) return moves;
 
+  const maxR = boardRows - 2, maxC = boardCols - 2;
   for (let r = 0; r <= maxR; r++) {
     for (let c = 0; c <= maxC; c++) {
+      const idxTL = r * boardCols + c;
+      const dTL = dMap1[idxTL], dTR = dMap1[idxTL + 1];
+      const dBL = dMap1[idxTL + boardCols], dBR = dMap1[idxTL + boardCols + 1];
+
       for (let o = 0; o < 2; o++) {
-        if (!wallGeometryLegal(r, c, o)) continue;
-        if (!isNemesisProbableWall(r, c, o, pR, pC, eR, eC)) continue;
-
-        placeWallFast(r, c, o);
-        updateDistMaps();
-        const nPDist = isMe ? distMe : distOpp;
-        const nEDist = isMe ? distOpp : distMe;
-        const newP = nPDist[pIdx];
-        const newE = nEDist[eIdx];
-
-        if (newP < 0 || newE < 0) {
-          removeWallFast(r, c, o);
-          continue;
-        }
-
-        const eGain = newE - curE;
-        const net = eGain - (newP - curP);
-        removeWallFast(r, c, o);
-
-        if (eWalls === 0 && eGain <= 0) continue;
-        if (net < 0 && !qSearchOnly) continue;
-
-        const code = packMove(1, r, c, o);
-        let prio = net * 10500 + eGain * 3500 + history[sideIdx][code];
-        if (code === ttBestCode) prio += 60000000;
-        tempWallCodes[wCount] = code;
-        tempWallPrios[wCount] = prio;
-        wCount++;
-      }
-    }
-  }
-
-  sortSubArray(tempWallCodes, tempWallPrios, wCount);
-  const take = Math.min(qSearchOnly ? 6 : 16, wCount);
-  for (let i = 0; i < take; i++) {
-    outCodes[moveCount] = tempWallCodes[i];
-    outPrios[moveCount] = tempWallPrios[i];
-    moveCount++;
-  }
-
-  sortSubArray(outCodes, outPrios, moveCount);
-  return moveCount;
-}
-
-function probeTT(idx, keyLo, keyHi) {
-  return (ttFlag[idx] !== 0 && ttKeyLo[idx] === keyLo && ttKeyHi[idx] === keyHi);
-}
-
-function pvs2P(depth, ply, alpha, beta, sideToMoveIsMe, prevMove) {
-  nodes++;
-  if ((nodes & 127) === 0 && now() >= deadline) {
-    timedOut = true;
-    return 0;
-  }
-
-  const oppGoal = isRaceMode ? 0 : boardRows - 1;
-  if (myR === 0) return sideToMoveIsMe ? (100000 - ply) : -(100000 - ply);
-  if (oppR === oppGoal) return sideToMoveIsMe ? -(100000 - ply) : (100000 - ply);
-
-  if (depth <= 0 || ply >= 60) return evaluate2P(sideToMoveIsMe);
-
-  const meIdx = myR * boardCols + myC;
-  const oppIdx = oppR * boardCols + oppC;
-  const kLo = (wHashLo ^ Z_ME_LO[meIdx] ^ Z_OPP_LO[oppIdx] ^ Z_MW_LO[myWalls] ^ Z_OW_LO[oppWalls]) >>> 0;
-  const kHi = (wHashHi ^ Z_ME_HI[meIdx] ^ Z_OPP_HI[oppIdx] ^ Z_MW_HI[myWalls] ^ Z_OW_HI[oppWalls] ^ (sideToMoveIsMe ? 0x12345678 : 0)) >>> 0;
-  const ttIdx = (kLo ^ kHi) & TT_MASK;
-
-  let ttBestCode = -1;
-  if (probeTT(ttIdx, kLo, kHi)) {
-    ttBestCode = ttBestMove[ttIdx];
-    if (ttDepth[ttIdx] >= depth) {
-      ttHits++;
-      if (ttFlag[ttIdx] === 1) return ttScore[ttIdx];
-      if (ttFlag[ttIdx] === 2 && ttScore[ttIdx] >= beta) return ttScore[ttIdx];
-      if (ttFlag[ttIdx] === 3 && ttScore[ttIdx] <= alpha) return ttScore[ttIdx];
-    }
-  }
-
-  const alphaOrig = alpha;
-  const nMoves = generateMoves2P(sideToMoveIsMe, ply, ttBestCode, prevMove, false);
-  if (nMoves === 0) return evaluate2P(sideToMoveIsMe);
-
-  const codes = plyMoveCodes[ply];
-  let bestScore = -200000;
-  let bestMoveCode = codes[0];
-  const sideIdx = sideToMoveIsMe ? 0 : 1;
-
-  for (let i = 0; i < nMoves; i++) {
-    const code = codes[i];
-    const mType = code & 1;
-    const mO = (code >>> 1) & 1;
-    const mR = (code >>> 2) & 15;
-    const mC = (code >>> 6) & 15;
-
-    const savedR = sideToMoveIsMe ? myR : oppR;
-    const savedC = sideToMoveIsMe ? myC : oppC;
-
-    if (mType === 0) {
-      if (sideToMoveIsMe) { myR = mR; myC = mC; }
-      else { oppR = mR; oppC = mC; }
-    } else {
-      placeWallFast(mR, mC, mO);
-      if (sideToMoveIsMe) myWalls--; else oppWalls--;
-    }
-
-    let score;
-    if (i === 0) {
-      score = -pvs2P(depth - 1, ply + 1, -beta, -alpha, !sideToMoveIsMe, code);
-    } else {
-      score = -pvs2P(depth - 1, ply + 1, -alpha - 1, -alpha, !sideToMoveIsMe, code);
-      if (!timedOut && score > alpha && score < beta) {
-        score = -pvs2P(depth - 1, ply + 1, -beta, -alpha, !sideToMoveIsMe, code);
-      }
-    }
-
-    if (mType === 0) {
-      if (sideToMoveIsMe) { myR = savedR; myC = savedC; }
-      else { oppR = savedR; oppC = savedC; }
-    } else {
-      removeWallFast(mR, mC, mO);
-      if (sideToMoveIsMe) myWalls++; else oppWalls++;
-    }
-
-    if (timedOut) return 0;
-    if (score > bestScore) {
-      bestScore = score;
-      bestMoveCode = code;
-    }
-    if (score > alpha) alpha = score;
-    if (alpha >= beta) {
-      cutoffs++;
-      history[sideIdx][code] = Math.min(400000, history[sideIdx][code] + depth * depth * 90);
-      break;
-    }
-  }
-
-  let flag = 1;
-  if (bestScore <= alphaOrig) flag = 3;
-  else if (bestScore >= beta) flag = 2;
-
-  ttKeyLo[ttIdx] = kLo;
-  ttKeyHi[ttIdx] = kHi;
-  ttScore[ttIdx] = bestScore;
-  ttDepth[ttIdx] = depth;
-  ttFlag[ttIdx] = flag;
-  ttBestMove[ttIdx] = bestMoveCode;
-
-  return bestScore;
-}
-
-function searchBestMoveJS(timeBudgetMs, maxSearchDepth) {
-  ttFlag.fill(0);
-  nodes = 0; ttHits = 0; cutoffs = 0; timedOut = false; completedDepth = 0;
-  deadline = now() + timeBudgetMs;
-
-  const nRoot = generateMoves2P(true, 0, -1, -1, false);
-  if (nRoot === 0) return null;
-
-  const rootList = new Int32Array(nRoot);
-  for (let i = 0; i < nRoot; i++) rootList[i] = plyMoveCodes[0][i];
-
-  if (myWalls === 0 && oppWalls === 0) {
-    completedDepth = 1;
-    return unpackMove(rootList[0]);
-  }
-
-  let bestCode = rootList[0];
-  let prevScore = evaluate2P(true);
-
-  for (let depth = 1; depth <= maxSearchDepth; depth++) {
-    if (now() >= deadline) break;
-    timedOut = false;
-
-    let delta = 700;
-    let alpha = (depth >= 3) ? Math.max(-200000, prevScore - delta) : -200000;
-    let beta  = (depth >= 3) ? Math.min(200000, prevScore + delta)  : 200000;
-
-    let iterBestCode = bestCode;
-    let iterBestScore = -200000;
-
-    for (let i = 0; i < nRoot; i++) {
-      const code = rootList[i];
-      const mType = code & 1, mO = (code >>> 1) & 1, mR = (code >>> 2) & 15, mC = (code >>> 6) & 15;
-      const savedR = myR, savedC = myC;
-      if (mType === 0) { myR = mR; myC = mC; }
-      else { placeWallFast(mR, mC, mO); myWalls--; }
-
-      const score = -pvs2P(depth - 1, 1, -beta, -alpha, false, code);
-
-      if (mType === 0) { myR = savedR; myC = savedC; }
-      else { removeWallFast(mR, mC, mO); myWalls++; }
-
-      if (timedOut) break;
-      if (score > iterBestScore) {
-        iterBestScore = score;
-        iterBestCode = code;
-      }
-      if (score > alpha) alpha = score;
-    }
-
-    if (!timedOut) {
-      bestCode = iterBestCode;
-      prevScore = iterBestScore;
-      completedDepth = depth;
-      if (iterBestScore >= 90000) break;
-    } else {
-      break;
-    }
-  }
-  return unpackMove(bestCode);
-}
-
-// ============================================================================
-// QUAD 4-PLAYER JS FALLBACK (11x11 — CENTER 5,5)
-// ============================================================================
-let quadPlayers = [];
-
-function computeCenterMap11() {
-  distCenter11.fill(-1);
-  let head = 0, tail = 0;
-  const centerIdx = 5 * 11 + 5;
-  distCenter11[centerIdx] = 0;
-  bfsQ[tail++] = centerIdx;
-
-  while (head < tail) {
-    const idx = bfsQ[head++];
-    const r = (idx / 11) | 0;
-    const c = idx - r * 11;
-    const nd = distCenter11[idx] + 1;
-
-    if (canUp(r, c)) {
-      const ni = idx - 11;
-      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
-    }
-    if (canDown(r, c)) {
-      const ni = idx + 11;
-      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
-    }
-    if (canLeft(r, c)) {
-      const ni = idx - 1;
-      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
-    }
-    if (canRight(r, c)) {
-      const ni = idx + 1;
-      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
-    }
-  }
-  return distCenter11;
-}
-
-function isCellOccupiedQuad(r, c, ignoreIdx) {
-  for (let i = 0; i < quadPlayers.length; i++) {
-    if (i !== ignoreIdx && quadPlayers[i].active && quadPlayers[i].r === r && quadPlayers[i].c === c) return true;
-  }
-  return false;
-}
-
-function getQuadSteps(pIdx) {
-  const p = quadPlayers[pIdx];
-  const out = [];
-  for (let d = 0; d < 4; d++) {
-    if (!canStepDir(p.r, p.c, d)) continue;
-    const nr = p.r + DR[d], nc = p.c + DC[d];
-    if (isCellOccupiedQuad(nr, nc, pIdx)) {
-      const jr = nr + DR[d], jc = nc + DC[d];
-      if (jr >= 0 && jr < 11 && jc >= 0 && jc < 11 && canStepDir(nr, nc, d) && !isCellOccupiedQuad(jr, jc, pIdx)) {
-        out.push({ r: jr, c: jc });
-      } else {
-        if (d < 2) {
-          if (canLeft(nr, nc) && !isCellOccupiedQuad(nr, nc - 1, pIdx)) out.push({ r: nr, c: nc - 1 });
-          if (canRight(nr, nc) && !isCellOccupiedQuad(nr, nc + 1, pIdx)) out.push({ r: nr, c: nc + 1 });
+        if (!wallGeometryLegalB(st.hWalls, st.vWalls, r, c, o)) continue;
+        let disturbsOpp = false;
+        if (o === 0) {
+          disturbsOpp = (Math.abs(dTL - dBL) === 1 && Math.min(dTL, dBL) < curOppD) ||
+                        (Math.abs(dTR - dBR) === 1 && Math.min(dTR, dBR) < curOppD);
         } else {
-          if (canUp(nr, nc) && !isCellOccupiedQuad(nr - 1, nc, pIdx)) out.push({ r: nr - 1, c: nc });
-          if (canDown(nr, nc) && !isCellOccupiedQuad(nr + 1, nc, pIdx)) out.push({ r: nr + 1, c: nc });
+          disturbsOpp = (Math.abs(dTL - dTR) === 1 && Math.min(dTL, dTR) < curOppD) ||
+                        (Math.abs(dBL - dBR) === 1 && Math.min(dBL, dBR) < curOppD);
+        }
+        if (oppW === 0) {
+          if (!disturbsOpp) continue;
+        } else {
+          if (!disturbsOpp && !isProbableWallNemesis(st, r, c, o)) continue;
+        }
+        if (!isWallLegalFull(st, r, c, o)) continue;
+        moves.push(packMove(1, r, c, o));
+      }
+    }
+  }
+  return moves;
+}
+
+const wallRolloutBuf = new Int32Array(128);
+
+function simulateRolloutJS(st) {
+  for (let step = 0; step < 110; step++) {
+    if (st.pR0 === goalRowOf(0)) return 0;
+    if (st.pR1 === goalRowOf(1)) return 1;
+
+    if (st.pW0 === 0 && st.pW1 === 0) {
+      computeDistToGoal(st.hWalls, st.vWalls, goalRowOf(0), dMap0);
+      computeDistToGoal(st.hWalls, st.vWalls, goalRowOf(1), dMap1);
+      const dist0 = dMap0[st.pR0 * boardCols + st.pC0];
+      const dist1 = dMap1[st.pR1 * boardCols + st.pC1];
+      return st.turn === 0 ? (dist0 <= dist1 ? 0 : 1) : (dist1 <= dist0 ? 1 : 0);
+    }
+
+    const s = st.turn;
+    const gMy = goalRowOf(s);
+    const myW = s === 0 ? st.pW0 : st.pW1;
+
+    if (fastRand01() < 0.70) {
+      computeDistToGoal(st.hWalls, st.vWalls, gMy, dMap0);
+      const nSteps = generatePawnStepsB(st, s);
+      let bestD = 999, bestCell = stepOutBuf[0], nBest = 0;
+      for (let i = 0; i < nSteps; i++) {
+        const cell = stepOutBuf[i];
+        const d = dMap0[cell];
+        if (d >= 0 && d < bestD) { bestD = d; bestCell = cell; nBest = 1; }
+        else if (d === bestD && (fastRand() & 1)) { bestCell = cell; nBest++; }
+      }
+      if (s === 0) { st.pR0 = (bestCell / boardCols) | 0; st.pC0 = bestCell % boardCols; }
+      else { st.pR1 = (bestCell / boardCols) | 0; st.pC1 = bestCell % boardCols; }
+      st.turn = 1 - s;
+      continue;
+    }
+
+    if (myW > 0) {
+      let nW = 0;
+      const maxR = boardRows - 2, maxC = boardCols - 2;
+      for (let r = 0; r <= maxR; r++) {
+        for (let c = 0; c <= maxC; c++) {
+          for (let o = 0; o < 2; o++) {
+            if (wallGeometryLegalB(st.hWalls, st.vWalls, r, c, o) && isProbableWallNemesis(st, r, c, o)) {
+              wallRolloutBuf[nW++] = packMove(1, r, c, o);
+            }
+          }
         }
       }
+      let placed = false;
+      for (let tries = 0; tries < 5 && nW > 0; tries++) {
+        const idx = fastRand() % nW;
+        const code = wallRolloutBuf[idx];
+        const wm = unpackMove(code);
+        if (isWallLegalFull(st, wm.r, wm.c, wm.o)) {
+          applyMoveState(st, code);
+          placed = true;
+          break;
+        }
+        wallRolloutBuf[idx] = wallRolloutBuf[--nW];
+      }
+      if (placed) continue;
     } else {
-      out.push({ r: nr, c: nc });
+      // 0 walls left penalty: move backwards
+      computeDistToGoal(st.hWalls, st.vWalls, gMy, dMap0);
+      const nSteps = generatePawnStepsB(st, s);
+      let worstD = -1, worstCell = stepOutBuf[0];
+      for (let i = 0; i < nSteps; i++) {
+        const cell = stepOutBuf[i];
+        if (dMap0[cell] > worstD) { worstD = dMap0[cell]; worstCell = cell; }
+      }
+      if (s === 0) { st.pR0 = (worstCell / boardCols) | 0; st.pC0 = worstCell % boardCols; }
+      else { st.pR1 = (worstCell / boardCols) | 0; st.pC1 = worstCell % boardCols; }
+      st.turn = 1 - s;
+      continue;
     }
+
+    computeDistToGoal(st.hWalls, st.vWalls, gMy, dMap0);
+    const nSteps = generatePawnStepsB(st, s);
+    let bestD = 999, bestCell = stepOutBuf[0];
+    for (let i = 0; i < nSteps; i++) {
+      const cell = stepOutBuf[i];
+      if (dMap0[cell] >= 0 && dMap0[cell] < bestD) { bestD = dMap0[cell]; bestCell = cell; }
+    }
+    if (s === 0) { st.pR0 = (bestCell / boardCols) | 0; st.pC0 = bestCell % boardCols; }
+    else { st.pR1 = (bestCell / boardCols) | 0; st.pC1 = bestCell % boardCols; }
+    st.turn = 1 - s;
   }
-  return out;
+
+  computeDistToGoal(st.hWalls, st.vWalls, goalRowOf(0), dMap0);
+  computeDistToGoal(st.hWalls, st.vWalls, goalRowOf(1), dMap1);
+  return dMap0[st.pR0 * boardCols + st.pC0] <= dMap1[st.pR1 * boardCols + st.pC1] ? 0 : 1;
 }
 
-function searchBestQuadMoveJS(timeBudgetMs) {
-  nodes = 0; completedDepth = 1;
-  const dist = computeCenterMap11();
-  const me = quadPlayers[0];
-  const curD = dist[me.r * 11 + me.c];
-  const steps = getQuadSteps(0);
+function searchNemesisMCTS_JS(rootSt, budgetMs) {
+  const nSteps = generatePawnStepsB(rootSt, 0);
+  for (let i = 0; i < nSteps; i++) {
+    const r = (stepOutBuf[i] / boardCols) | 0, c = stepOutBuf[i] % boardCols;
+    if (r === goalRowOf(0)) return { move: { type: 0, r, c, o: 0 }, sims: 1, depth: 1 };
+  }
 
-  let bestMove = null;
-  let bestPrio = -1e9;
+  if (rootSt.pW0 === 0 && rootSt.pW1 === 0) {
+    computeDistToGoal(rootSt.hWalls, rootSt.vWalls, goalRowOf(0), dMap0);
+    let bestD = 999, bestCell = stepOutBuf[0];
+    for (let i = 0; i < nSteps; i++) {
+      const cell = stepOutBuf[i];
+      if (dMap0[cell] >= 0 && dMap0[cell] < bestD) { bestD = dMap0[cell]; bestCell = cell; }
+    }
+    return { move: { type: 0, r: (bestCell / boardCols) | 0, c: bestCell % boardCols, o: 0 }, sims: 1, depth: 20 };
+  }
 
-  for (let i = 0; i < steps.length; i++) {
-    const st = steps[i];
-    if (st.r === 5 && st.c === 5) return { type: 0, r: 5, c: 5, o: 0 };
-    const nd = dist[st.r * 11 + st.c];
-    const prio = (curD - nd) * 15000;
-    if (prio > bestPrio) {
-      bestPrio = prio;
-      bestMove = { type: 0, r: st.r, c: st.c, o: 0 };
+  const rootNode = {
+    parent: null,
+    moveCode: 0,
+    moverSide: 1,
+    visits: 0,
+    wins: 0,
+    children: null,
+    untriedMoves: getExpansionMoves(rootSt)
+  };
+
+  if (rootNode.untriedMoves.length === 1) {
+    return { move: unpackMove(rootNode.untriedMoves[0]), sims: 1, depth: 1 };
+  }
+
+  const deadline = now() + budgetMs;
+  const UCT_CONST = 0.2;
+  let sims = 0;
+  let maxDepth = 1;
+
+  for (; sims < 60000; sims++) {
+    if ((sims & 63) === 0 && now() >= deadline) break;
+
+    const simSt = cloneState(rootSt);
+    let node = rootNode;
+    let depth = 0;
+
+    // Selection
+    while (node.untriedMoves.length === 0 && node.children && node.children.length > 0) {
+      let bestChild = node.children[0];
+      let bestUCT = -1e18;
+      const logP = Math.log(Math.max(1, node.visits));
+      for (let i = 0; i < node.children.length; i++) {
+        const ch = node.children[i];
+        const uct = (ch.wins / ch.visits) + UCT_CONST * Math.sqrt(logP / ch.visits);
+        if (uct > bestUCT) { bestUCT = uct; bestChild = ch; }
+      }
+      node = bestChild;
+      applyMoveState(simSt, node.moveCode);
+      depth++;
+    }
+
+    // Expansion
+    if (node.untriedMoves.length > 0) {
+      const idx = fastRand() % node.untriedMoves.length;
+      const code = node.untriedMoves[idx];
+      node.untriedMoves[idx] = node.untriedMoves[node.untriedMoves.length - 1];
+      node.untriedMoves.pop();
+
+      const mover = simSt.turn;
+      applyMoveState(simSt, code);
+      depth++;
+
+      const child = {
+        parent: node,
+        moveCode: code,
+        moverSide: mover,
+        visits: 0,
+        wins: 0,
+        children: null,
+        untriedMoves: (simSt.pR0 === goalRowOf(0) || simSt.pR1 === goalRowOf(1)) ? [] : getExpansionMoves(simSt)
+      };
+      if (!node.children) node.children = [];
+      node.children.push(child);
+      node = child;
+    }
+
+    if (depth > maxDepth) maxDepth = depth;
+
+    // Simulation
+    const winner = simulateRolloutJS(simSt);
+
+    // Backpropagation
+    while (node !== null) {
+      node.visits++;
+      if (node.moverSide === winner) node.wins += 1.0;
+      node = node.parent;
     }
   }
-  return bestMove;
-}
 
-function loadBoardWalls(m) {
-  hWalls.fill(0);
-  vWalls.fill(0);
-  wHashLo = 0;
-  wHashHi = 0;
-  totalWallsPlaced = 0;
-
-  if (Array.isArray(m.wallList)) {
-    for (let i = 0; i < m.wallList.length; i++) {
-      const parts = String(m.wallList[i]).split(",");
-      const r = +parts[0], c = +parts[1], o = parts[2] === "h" ? 0 : 1;
-      placeWallFast(r, c, o);
+  // Robust child selection (highest visit count)
+  let bestChild = rootNode.children[0];
+  for (let i = 1; i < rootNode.children.length; i++) {
+    const ch = rootNode.children[i];
+    if (ch.visits > bestChild.visits ||
+       (ch.visits === bestChild.visits && (ch.wins / ch.visits) > (bestChild.wins / bestChild.visits))) {
+      bestChild = ch;
     }
   }
+
+  return {
+    move: unpackMove(bestChild.moveCode),
+    sims,
+    depth: maxDepth
+  };
 }
 
 self.onmessage = function (e) {
@@ -798,12 +613,14 @@ self.onmessage = function (e) {
     isQuadMode = (m.mode === "quad" || boardCols === 11);
     isRaceMode = (!isQuadMode && boardRows === 13);
 
-    const budget = Math.max(500, Math.min(1800, Number(m.timeMs) || 1200));
-    const maxD = Math.min(16, Number(m.maxDepth) || 14);
+    const budget = Math.max(800, Math.min(3500, Number(m.timeMs) || 2000));
+    const maxD = Math.min(20, Number(m.maxDepth) || 16);
     const t0 = now();
 
     let bestMove = null;
-    let usedEngine = "js";
+    let nodes = 0;
+    let completedDepth = 0;
+    let usedEngine = "js-mcts";
 
     if (wasmReady && wasmSearchFn) {
       const modeCode = isQuadMode ? 2 : (isRaceMode ? 1 : 0);
@@ -831,21 +648,28 @@ self.onmessage = function (e) {
     }
 
     if (!bestMove) {
-      loadBoardWalls(m);
-      if (isQuadMode && m.players) {
-        quadPlayers = [
-          { ...m.players.me },
-          { ...m.players.left },
-          { ...m.players.top },
-          { ...m.players.right }
-        ];
-        bestMove = searchBestQuadMoveJS(budget);
-      } else {
-        myR = m.my.r; myC = m.my.c; myWalls = m.my.walls;
-        oppR = m.opp.r; oppC = m.opp.c; oppWalls = m.opp.walls;
-        bestMove = searchBestMoveJS(budget, maxD);
+      const rootSt = {
+        hWalls: new Uint8Array(169),
+        vWalls: new Uint8Array(169),
+        pR0: m.my.r, pC0: m.my.c, pW0: m.my.walls,
+        pR1: m.opp.r, pC1: m.opp.c, pW1: m.opp.walls,
+        turn: 0,
+        totalWalls: 0
+      };
+      if (Array.isArray(m.wallList)) {
+        for (let i = 0; i < m.wallList.length; i++) {
+          const parts = String(m.wallList[i]).split(",");
+          const r = +parts[0], c = +parts[1], o = parts[2] === "h" ? 0 : 1;
+          const idx = r * (boardCols - 1) + c;
+          if (o === 0) rootSt.hWalls[idx] = 1; else rootSt.vWalls[idx] = 1;
+          rootSt.totalWalls++;
+        }
       }
-      usedEngine = "js";
+      const res = searchNemesisMCTS_JS(rootSt, budget);
+      bestMove = res.move;
+      nodes = res.sims;
+      completedDepth = res.depth;
+      usedEngine = "js-mcts";
     }
 
     const elapsed = Math.round(now() - t0);
@@ -857,8 +681,8 @@ self.onmessage = function (e) {
       nodes: nodes,
       depth: completedDepth,
       elapsed: elapsed,
-      ttHits: ttHits,
-      cutoffs: cutoffs
+      ttHits: 0,
+      cutoffs: 0
     });
   } catch (err) {
     self.postMessage({
