@@ -16,511 +16,285 @@
 using namespace std;
 
 // ============================================================================
-// WALLHACK GRANDMASTER ENGINE (EXACT NEMESIS + STOCKFISH ALPHA-BETA HYBRID)
-// Incorporates exact algorithms extracted from gorisanson/quoridor-ai (game.js & ai.js):
-// 1. O(1) Two-Point Topological Articulation Filter (testIfConnectedOnTwoPoints)
-// 2. Exact Nemesis Wall-Chain Stencils (col +/- 2, col +/- 3 gap-1 door traps,
-//    setWallsBesidePawn, and turn >= 6 leftmost/rightmost edge horizontal walls)
-// 3. Exact Shortest-Path DAG Edge-Cutter (getValidNextWallsDisturbPathOf)
-// 4. Combined with Alpha-Beta PVS + 2-Ply Cage-Probe (curing MCTS trap blindness)
+// EXACT 1-TO-1 PORT OF NEMESIS (gorisanson/quoridor-ai v0.3)
+// Algorithm: UCT Monte Carlo Tree Search (MCTS)
+// - uctConst = 0.2 (exact v0.3 tuning)
+// - 60,000 rollouts per move (Strong / Nemesis tier)
+// - Final move selection: Robust Child (max visit count N, NOT max winrate)
+// - Rollout policy: 70% shortest-path pawn step, 30% probable wall (or backward
+//   step penalty if 0 walls left)
+// - Two-point topological connectivity filter + Probable Wall Stencil
+// - Opening book for first 6 plies + Exact 0-wall race solver
 // ============================================================================
 
 enum MoveType : uint8_t { STEP = 0, WALL = 1 };
 
 struct Move {
     uint8_t type;    // 0 = step, 1 = wall
-    uint8_t r, c, o; // o: 0 = horizontal, 1 = vertical
-    int32_t orderScore;
+    uint8_t r, c, o; // o: 0 = h, 1 = v
 };
 
 static inline uint16_t packMove16(uint8_t type, uint8_t r, uint8_t c, uint8_t o) {
     return (uint16_t)((type & 1) | ((o & 1) << 1) | ((r & 15) << 2) | ((c & 15) << 6));
 }
 
-static inline void unpackMove16(uint16_t code, uint8_t& type, uint8_t& r, uint8_t& c, uint8_t& o) {
-    type = code & 1;
-    o = (code >> 1) & 1;
-    r = (code >> 2) & 15;
-    c = (code >> 6) & 15;
+static inline Move unpackMove16(uint16_t code) {
+    return {
+        (uint8_t)(code & 1),
+        (uint8_t)((code >> 2) & 15),
+        (uint8_t)((code >> 6) & 15),
+        (uint8_t)((code >> 1) & 1)
+    };
 }
-
-enum TTFlag : uint8_t { TT_NONE = 0, TT_EXACT = 1, TT_LOWER = 2, TT_UPPER = 3 };
-
-struct TTEntry {
-    uint64_t key;
-    int32_t score;
-    int8_t depth;
-    uint8_t flag;
-    uint16_t bestMove;
-};
-
-struct TTCluster {
-    TTEntry depthPreferred;
-    TTEntry alwaysReplace;
-};
-
-static const int TT_CLUSTERS = 1 << 19; // 524,288 clusters (1,048,576 entries)
-static const int TT_MASK = TT_CLUSTERS - 1;
-static TTCluster TT[TT_CLUSTERS];
-
-struct PathMetrics {
-    int8_t dist;
-    int16_t ways;
-    uint8_t exits;
-    uint8_t onShortestDAG; // 1 if cell belongs to at least one shortest path from pawn to goal
-};
-
-struct DistCacheEntry {
-    uint64_t wallKey;
-    PathMetrics me[144];
-    PathMetrics opp[144];
-    bool valid;
-};
-
-static const int DC_SIZE = 1 << 15;
-static const int DC_MASK = DC_SIZE - 1;
-static DistCacheEntry DistCache[DC_SIZE];
-
-static uint64_t Z_ME[169];
-static uint64_t Z_OPP[169];
-static uint64_t Z_HWALL[169];
-static uint64_t Z_VWALL[169];
-static uint64_t Z_MW[20];
-static uint64_t Z_OW[20];
-static uint64_t Z_TURN;
 
 static int B_ROWS = 9;
 static int B_COLS = 9;
 static int GAME_MODE = 0; // 0 = Duel 9x9, 1 = Race 9x13, 2 = Quad 11x11
 
-static uint8_t hWalls[169];
-static uint8_t vWalls[169];
-static int totalWallsOnBoard = 0;
+static uint32_t rngState = 0x13579BDFU;
+static inline uint32_t fastRand() {
+    uint32_t x = rngState;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    return rngState = x;
+}
+static inline double fastRand01() {
+    return (fastRand() & 0xFFFFFF) / 16777216.0;
+}
 
-static int myR = 8, myC = 4, myWalls = 10;
-static int oppR = 0, oppC = 4, oppWalls = 10;
-
-struct QuadPlayer {
-    int r, c, walls;
-    bool active;
-};
-static QuadPlayer quadP[4];
-
-static uint64_t wallZobrist = 0;
-static uint16_t killerMoves[64][2];
-static uint16_t counterMoves[2][1024];
-static int32_t historyTable[2][1024];
-
-static int64_t searchDeadline = 0;
-static bool searchAborted = false;
-static uint32_t nodesSearched = 0;
-static int completedDepthGlobal = 0;
-
-struct EvalParams {
-    int32_t tempoPerStep;         // 1000 cp: 1 full step closer to goal
-    int32_t turnAdvantage;        // 500 cp: right to move first (0.5 step)
-    int32_t exitWeight;           // 170 cp: local degrees of freedom on shortest DAG
-    int32_t waysWeight;           // 95 cp: global route multiplicity (log2 ways)
-    int32_t corridorTrapBonus;    // 410 cp: opponent restricted to 1 exit with walls in reserve
-    int32_t oppositionBonus;      // 960 cp: direct adjacent pawn jump threat
-    int32_t centerWeight;         // 24 cp: central column control
-    int32_t cageThreatWeight;     // 1250 cp: 2-wall cage trap penalty/bonus
+struct BoardState {
+    uint8_t hWalls[169];
+    uint8_t vWalls[169];
+    int pR[2], pC[2], pWalls[2];
+    int turn; // 0 = me (goal 0), 1 = opp (goal B_ROWS-1 or 0 in race)
+    int totalWalls;
 };
 
-static const EvalParams PARAMS_DUEL = { 1000, 500, 170, 95, 410, 960, 24, 1250 };
-static const EvalParams PARAMS_RACE = { 1050, 525, 145, 75, 320, 900, 12, 1300 };
-
-static const int32_t WALL_MATERIAL_TABLE[16] = {
-    0, 1450, 2700, 3800, 4800, 5720, 6580, 7390, 8150, 8860, 9500, 10100, 10680, 11240, 11780, 12300
-};
-
-static inline int64_t nowMs() {
-    return chrono::duration_cast<chrono::milliseconds>(
-        chrono::steady_clock::now().time_since_epoch()
-    ).count();
+static inline int goalRowOf(int side) {
+    if (GAME_MODE == 1) return 0;
+    return (side == 0) ? 0 : (B_ROWS - 1);
 }
 
-static uint64_t splitmix64(uint64_t& x) {
-    uint64_t z = (x += 0x9e3779b97f4a7c15ULL);
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
-    return z ^ (z >> 31);
-}
-
-extern "C" {
-EXPORT_FN void initEngine() {
-    uint64_t seed = 0x517cc1b727220a95ULL;
-    for (int i = 0; i < 169; i++) {
-        Z_ME[i] = splitmix64(seed);
-        Z_OPP[i] = splitmix64(seed);
-        Z_HWALL[i] = splitmix64(seed);
-        Z_VWALL[i] = splitmix64(seed);
-    }
-    for (int i = 0; i < 20; i++) {
-        Z_MW[i] = splitmix64(seed);
-        Z_OW[i] = splitmix64(seed);
-    }
-    Z_TURN = splitmix64(seed);
-    memset(TT, 0, sizeof(TT));
-    memset(DistCache, 0, sizeof(DistCache));
-}
-}
-
-static inline bool canUp(int r, int c) {
+static inline bool canUpB(const BoardState& b, int r, int c) {
     if (r <= 0) return false;
     int wC = B_COLS - 1;
     int base = (r - 1) * wC;
-    return (c >= wC || hWalls[base + c] == 0) && (c <= 0 || hWalls[base + c - 1] == 0);
+    return (c >= wC || b.hWalls[base + c] == 0) && (c <= 0 || b.hWalls[base + c - 1] == 0);
 }
-
-static inline bool canDown(int r, int c) {
+static inline bool canDownB(const BoardState& b, int r, int c) {
     if (r >= B_ROWS - 1) return false;
     int wC = B_COLS - 1;
     int base = r * wC;
-    return (c >= wC || hWalls[base + c] == 0) && (c <= 0 || hWalls[base + c - 1] == 0);
+    return (c >= wC || b.hWalls[base + c] == 0) && (c <= 0 || b.hWalls[base + c - 1] == 0);
 }
-
-static inline bool canLeft(int r, int c) {
+static inline bool canLeftB(const BoardState& b, int r, int c) {
     if (c <= 0) return false;
     int wC = B_COLS - 1;
-    return (r >= B_ROWS - 1 || vWalls[r * wC + c - 1] == 0) && (r <= 0 || vWalls[(r - 1) * wC + c - 1] == 0);
+    return (r >= B_ROWS - 1 || b.vWalls[r * wC + c - 1] == 0) && (r <= 0 || b.vWalls[(r - 1) * wC + c - 1] == 0);
 }
-
-static inline bool canRight(int r, int c) {
+static inline bool canRightB(const BoardState& b, int r, int c) {
     int wC = B_COLS - 1;
     if (c >= wC) return false;
-    return (r >= B_ROWS - 1 || vWalls[r * wC + c] == 0) && (r <= 0 || vWalls[(r - 1) * wC + c] == 0);
+    return (r >= B_ROWS - 1 || b.vWalls[r * wC + c] == 0) && (r <= 0 || b.vWalls[(r - 1) * wC + c] == 0);
 }
 
-static inline bool canStepDir(int r, int c, int dir) {
-    if (dir == 0) return canUp(r, c);
-    if (dir == 1) return canDown(r, c);
-    if (dir == 2) return canLeft(r, c);
-    return canRight(r, c);
+static inline bool canStepDirB(const BoardState& b, int r, int c, int d) {
+    if (d == 0) return canUpB(b, r, c);
+    if (d == 1) return canDownB(b, r, c);
+    if (d == 2) return canLeftB(b, r, c);
+    return canRightB(b, r, c);
 }
 
-static inline void placeWallInternal(int r, int c, int o) {
-    int idx = r * (B_COLS - 1) + c;
-    if (o == 0) {
-        hWalls[idx] = 1;
-        wallZobrist ^= Z_HWALL[idx];
-    } else {
-        vWalls[idx] = 1;
-        wallZobrist ^= Z_VWALL[idx];
-    }
-    totalWallsOnBoard++;
-}
+static const int DR[4] = {-1, 1, 0, 0};
+static const int DC[4] = {0, 0, -1, 1};
 
-static inline void removeWallInternal(int r, int c, int o) {
-    int idx = r * (B_COLS - 1) + c;
-    if (o == 0) {
-        hWalls[idx] = 0;
-        wallZobrist ^= Z_HWALL[idx];
-    } else {
-        vWalls[idx] = 0;
-        wallZobrist ^= Z_VWALL[idx];
-    }
-    totalWallsOnBoard--;
-}
-
-static inline bool wallGeometryLegal(int r, int c, int o) {
+static inline bool wallGeometryLegalB(const BoardState& b, int r, int c, int o) {
     int maxR = B_ROWS - 2;
     int maxC = B_COLS - 2;
     if (r < 0 || r > maxR || c < 0 || c > maxC) return false;
     int stride = B_COLS - 1;
     int idx = r * stride + c;
     if (o == 0) {
-        if (hWalls[idx] || vWalls[idx]) return false;
-        if ((c > 0 && hWalls[idx - 1]) || (c < maxC && hWalls[idx + 1])) return false;
+        if (b.hWalls[idx] || b.vWalls[idx]) return false;
+        if ((c > 0 && b.hWalls[idx - 1]) || (c < maxC && b.hWalls[idx + 1])) return false;
         return true;
     } else {
-        if (vWalls[idx] || hWalls[idx]) return false;
-        if ((r > 0 && vWalls[idx - stride]) || (r < maxR && vWalls[idx + stride])) return false;
+        if (b.vWalls[idx] || b.hWalls[idx]) return false;
+        if ((r > 0 && b.vWalls[idx - stride]) || (r < maxR && b.vWalls[idx + stride])) return false;
         return true;
     }
 }
 
-// ============================================================================
-// EXACT NEMESIS O(1) TWO-POINT CONNECTIVITY FILTER (from game.js)
-// A wall that does NOT connect to at least 2 existing wall endpoints/edges
-// CANNOT disconnect any player's path to goal!
-// ============================================================================
-static inline bool isConnectedOnTwoPoints(int r, int c, int o) {
+// Exact testIfConnectedOnTwoPoints from gorisanson/quoridor-ai game.js
+static inline bool isConnectedOnTwoPointsB(const BoardState& b, int r, int c, int o) {
     int stride = B_COLS - 1;
     int maxR = B_ROWS - 2;
     int maxC = B_COLS - 2;
 
     if (o == 0) {
-        // Left endpoint connectivity
         bool left = (c == 0);
         if (!left && c >= 1) {
-            if (vWalls[r * stride + (c - 1)]) left = true;
-            else if (r >= 1 && vWalls[(r - 1) * stride + (c - 1)]) left = true;
-            else if (r < maxR && vWalls[(r + 1) * stride + (c - 1)]) left = true;
-            else if (c >= 2 && hWalls[r * stride + (c - 2)]) left = true;
+            if (b.vWalls[r * stride + (c - 1)] ||
+                (r >= 1 && b.vWalls[(r - 1) * stride + (c - 1)]) ||
+                (r < maxR && b.vWalls[(r + 1) * stride + (c - 1)]) ||
+                (c >= 2 && b.hWalls[r * stride + (c - 2)])) left = true;
         }
-        // Right endpoint connectivity
         bool right = (c == maxC);
         if (!right && c < maxC) {
-            if (vWalls[r * stride + (c + 1)]) right = true;
-            else if (r >= 1 && vWalls[(r - 1) * stride + (c + 1)]) right = true;
-            else if (r < maxR && vWalls[(r + 1) * stride + (c + 1)]) right = true;
-            else if (c + 2 <= maxC && hWalls[r * stride + (c + 2)]) right = true;
+            if (b.vWalls[r * stride + (c + 1)] ||
+                (r >= 1 && b.vWalls[(r - 1) * stride + (c + 1)]) ||
+                (r < maxR && b.vWalls[(r + 1) * stride + (c + 1)]) ||
+                (c + 2 <= maxC && b.hWalls[r * stride + (c + 2)])) right = true;
         }
-        // Middle intersection connectivity
-        bool middle = false;
-        if (r >= 1 && vWalls[(r - 1) * stride + c]) middle = true;
-        else if (r < maxR && vWalls[(r + 1) * stride + c]) middle = true;
-
+        bool middle = (r >= 1 && b.vWalls[(r - 1) * stride + c]) ||
+                      (r < maxR && b.vWalls[(r + 1) * stride + c]);
         return (left && right) || (right && middle) || (middle && left);
     } else {
-        // Top endpoint connectivity
         bool top = (r == 0);
         if (!top && r >= 1) {
-            if (hWalls[(r - 1) * stride + c]) top = true;
-            else if (c >= 1 && hWalls[(r - 1) * stride + (c - 1)]) top = true;
-            else if (c < maxC && hWalls[(r - 1) * stride + (c + 1)]) top = true;
-            else if (r >= 2 && vWalls[(r - 2) * stride + c]) top = true;
+            if (b.hWalls[(r - 1) * stride + c] ||
+                (c >= 1 && b.hWalls[(r - 1) * stride + (c - 1)]) ||
+                (c < maxC && b.hWalls[(r - 1) * stride + (c + 1)]) ||
+                (r >= 2 && b.vWalls[(r - 2) * stride + c])) top = true;
         }
-        // Bottom endpoint connectivity
         bool bottom = (r == maxR);
         if (!bottom && r < maxR) {
-            if (hWalls[(r + 1) * stride + c]) bottom = true;
-            else if (c >= 1 && hWalls[(r + 1) * stride + (c - 1)]) bottom = true;
-            else if (c < maxC && hWalls[(r + 1) * stride + (c + 1)]) bottom = true;
-            else if (r + 2 <= maxR && vWalls[(r + 2) * stride + c]) bottom = true;
+            if (b.hWalls[(r + 1) * stride + c] ||
+                (c >= 1 && b.hWalls[(r + 1) * stride + (c - 1)]) ||
+                (c < maxC && b.hWalls[(r + 1) * stride + (c + 1)]) ||
+                (r + 2 <= maxR && b.vWalls[(r + 2) * stride + c])) bottom = true;
         }
-        // Middle intersection connectivity
-        bool middle = false;
-        if (c >= 1 && hWalls[r * stride + (c - 1)]) middle = true;
-        else if (c < maxC && hWalls[r * stride + (c + 1)]) middle = true;
-
+        bool middle = (c >= 1 && b.hWalls[r * stride + (c - 1)]) ||
+                      (c < maxC && b.hWalls[r * stride + (c + 1)]);
         return (top && bottom) || (bottom && middle) || (middle && top);
     }
 }
 
-// ============================================================================
-// EXACT NEMESIS PROBABLE WALL STENCILS (from game.js: setWallsBesidePawn &
-// adjustProbableValidNextWallForAfterPlaceHorizontal/VerticalWall)
-// ============================================================================
-static inline bool isPawnBesideWallNemesis(int r, int c, int o, int pR, int pC) {
-    if (o == 0) {
-        // Horizontal wall beside pawn: rows [pR-1, pR], cols [pC-2 .. pC+1]
-        if (r == pR - 1 || r == pR) {
-            if (c >= pC - 2 && c <= pC + 1) return true;
-        }
-    } else {
-        // Vertical wall beside pawn: rows [pR-2 .. pR+1], cols [pC-1, pC]
-        if (c == pC - 1 || c == pC) {
-            if (r >= pR - 2 && r <= pR + 1) return true;
-        }
-    }
-    return false;
-}
-
-static inline bool isWallChainExtensionNemesis(int r, int c, int o) {
-    if (totalWallsOnBoard == 0) return false;
-    int stride = B_COLS - 1;
-    int maxR = B_ROWS - 2;
-    int maxC = B_COLS - 2;
-
-    if (o == 0) {
-        // Check if this horizontal wall is triggered by an existing H or V wall
-        // 1. Triggered by existing Horizontal wall at (r, c +/- 2) or (r, c +/- 3) [1-cell door gap!]
-        if (c >= 2 && hWalls[r * stride + (c - 2)]) return true;
-        if (c + 2 <= maxC && hWalls[r * stride + (c + 2)]) return true;
-        if (c >= 3 && hWalls[r * stride + (c - 3)]) return true;
-        if (c + 3 <= maxC && hWalls[r * stride + (c + 3)]) return true;
-
-        // 2. Triggered by existing Vertical wall at dr in [-2..2], dc in [-1..1]
-        for (int dr = -2; dr <= 2; dr++) {
-            int nr = r + dr;
-            if (nr < 0 || nr > maxR) continue;
-            for (int dc = -1; dc <= 1; dc++) {
-                int nc = c + dc;
-                if (nc >= 0 && nc <= maxC && vWalls[nr * stride + nc]) return true;
-            }
-        }
-    } else {
-        // Check if this vertical wall is triggered by an existing V or H wall
-        // 1. Triggered by existing Vertical wall at (r +/- 2, c) or (r +/- 3, c) [1-cell door gap!]
-        if (r >= 2 && vWalls[(r - 2) * stride + c]) return true;
-        if (r + 2 <= maxR && vWalls[(r + 2) * stride + c]) return true;
-        if (r >= 3 && vWalls[(r - 3) * stride + c]) return true;
-        if (r + 3 <= maxR && vWalls[(r + 3) * stride + c]) return true;
-
-        // 2. Triggered by existing Horizontal wall at dr in [-1..1], dc in [-2..2]
-        for (int dr = -1; dr <= 1; dr++) {
-            int nr = r + dr;
-            if (nr < 0 || nr > maxR) continue;
-            for (int dc = -2; dc <= 2; dc++) {
-                int nc = c + dc;
-                if (nc >= 0 && nc <= maxC && hWalls[nr * stride + nc]) return true;
-            }
-        }
-    }
-    return false;
-}
-
-static inline bool isNemesisProbableWall(int r, int c, int o, int pR, int pC, int eR, int eC) {
-    int maxC = B_COLS - 2;
-    // 1. Beside opponent pawn or own pawn (exact setWallsBesidePawn stencil)
-    if (isPawnBesideWallNemesis(r, c, o, eR, eC)) return true;
-    if (isPawnBesideWallNemesis(r, c, o, pR, pC)) return true;
-
-    // 2. Leftmost and rightmost horizontal walls (c == 0 or c == maxC)
-    if (o == 0 && (c == 0 || c == maxC)) return true;
-
-    // 3. Exact Nemesis wall-chain & gap-1 door extensions
-    if (isWallChainExtensionNemesis(r, c, o)) return true;
-
-    return false;
-}
-
 static int16_t bfsQ[256];
 
-static void runReverseGoalBfs(int goalRow, PathMetrics* outMetrics) {
+static void computeDistToGoal(const BoardState& b, int goalRow, int8_t* dist) {
     int total = B_ROWS * B_COLS;
-    for (int i = 0; i < total; i++) {
-        outMetrics[i] = {-1, 0, 0, 0};
-    }
+    memset(dist, -1, total);
     int head = 0, tail = 0;
     int base = goalRow * B_COLS;
     for (int c = 0; c < B_COLS; c++) {
-        int idx = base + c;
-        outMetrics[idx].dist = 0;
-        outMetrics[idx].ways = 1;
-        bfsQ[tail++] = idx;
+        dist[base + c] = 0;
+        bfsQ[tail++] = base + c;
     }
-
     while (head < tail) {
         int idx = bfsQ[head++];
         int r = idx / B_COLS;
         int c = idx - r * B_COLS;
-        int8_t nd = outMetrics[idx].dist + 1;
-        int16_t curWays = outMetrics[idx].ways;
-
-        const auto expand = [&](bool open, int ni) {
-            if (!open) return;
-            if (outMetrics[ni].dist == -1) {
-                outMetrics[ni].dist = nd;
-                outMetrics[ni].ways = curWays;
-                bfsQ[tail++] = ni;
-            } else if (outMetrics[ni].dist == nd) {
-                int32_t sum = (int32_t)outMetrics[ni].ways + curWays;
-                outMetrics[ni].ways = (int16_t)(sum > 4096 ? 4096 : sum);
-            }
-        };
-
-        expand(canUp(r, c), idx - B_COLS);
-        expand(canDown(r, c), idx + B_COLS);
-        expand(canLeft(r, c), idx - 1);
-        expand(canRight(r, c), idx + 1);
-    }
-
-    for (int idx = 0; idx < total; idx++) {
-        int8_t d = outMetrics[idx].dist;
-        if (d <= 0) continue;
-        int r = idx / B_COLS;
-        int c = idx - r * B_COLS;
-        int8_t target = d - 1;
-        uint8_t exits = 0;
-        if (canUp(r, c) && outMetrics[idx - B_COLS].dist == target) exits++;
-        if (canDown(r, c) && outMetrics[idx + B_COLS].dist == target) exits++;
-        if (canLeft(r, c) && outMetrics[idx - 1].dist == target) exits++;
-        if (canRight(r, c) && outMetrics[idx + 1].dist == target) exits++;
-        outMetrics[idx].exits = exits;
+        int8_t nd = dist[idx] + 1;
+        if (canUpB(b, r, c) && dist[idx - B_COLS] == -1) { dist[idx - B_COLS] = nd; bfsQ[tail++] = idx - B_COLS; }
+        if (canDownB(b, r, c) && dist[idx + B_COLS] == -1) { dist[idx + B_COLS] = nd; bfsQ[tail++] = idx + B_COLS; }
+        if (canLeftB(b, r, c) && dist[idx - 1] == -1) { dist[idx - 1] = nd; bfsQ[tail++] = idx - 1; }
+        if (canRightB(b, r, c) && dist[idx + 1] == -1) { dist[idx + 1] = nd; bfsQ[tail++] = idx + 1; }
     }
 }
 
-static void runCenterBfs11(PathMetrics* outMetrics) {
-    for (int i = 0; i < 121; i++) {
-        outMetrics[i] = {-1, 0, 0, 0};
-    }
+static bool hasPathToGoal(const BoardState& b, int startR, int startC, int goalRow) {
+    uint8_t vis[169];
+    memset(vis, 0, B_ROWS * B_COLS);
     int head = 0, tail = 0;
-    int centerIdx = 5 * 11 + 5;
-    outMetrics[centerIdx].dist = 0;
-    outMetrics[centerIdx].ways = 1;
-    bfsQ[tail++] = centerIdx;
-
+    int startIdx = startR * B_COLS + startC;
+    vis[startIdx] = 1;
+    bfsQ[tail++] = startIdx;
     while (head < tail) {
         int idx = bfsQ[head++];
-        int r = idx / 11;
-        int c = idx - r * 11;
-        int8_t nd = outMetrics[idx].dist + 1;
-        int16_t curWays = outMetrics[idx].ways;
+        int r = idx / B_COLS;
+        if (r == goalRow) return true;
+        int c = idx - r * B_COLS;
+        if (canUpB(b, r, c) && !vis[idx - B_COLS]) { vis[idx - B_COLS] = 1; bfsQ[tail++] = idx - B_COLS; }
+        if (canDownB(b, r, c) && !vis[idx + B_COLS]) { vis[idx + B_COLS] = 1; bfsQ[tail++] = idx + B_COLS; }
+        if (canLeftB(b, r, c) && !vis[idx - 1]) { vis[idx - 1] = 1; bfsQ[tail++] = idx - 1; }
+        if (canRightB(b, r, c) && !vis[idx + 1]) { vis[idx + 1] = 1; bfsQ[tail++] = idx + 1; }
+    }
+    return false;
+}
 
-        const auto expand = [&](bool open, int ni) {
-            if (!open) return;
-            if (outMetrics[ni].dist == -1) {
-                outMetrics[ni].dist = nd;
-                outMetrics[ni].ways = curWays;
-                bfsQ[tail++] = ni;
-            } else if (outMetrics[ni].dist == nd) {
-                int32_t sum = (int32_t)outMetrics[ni].ways + curWays;
-                outMetrics[ni].ways = (int16_t)(sum > 4096 ? 4096 : sum);
+static inline bool isWallLegalFull(BoardState& b, int r, int c, int o) {
+    if (!wallGeometryLegalB(b, r, c, o)) return false;
+    bool checkPaths = isConnectedOnTwoPointsB(b, r, c, o);
+    if (!checkPaths) return true; // O(1) guarantee that paths remain open!
+
+    int idx = r * (B_COLS - 1) + c;
+    if (o == 0) b.hWalls[idx] = 1; else b.vWalls[idx] = 1;
+    bool ok = hasPathToGoal(b, b.pR[0], b.pC[0], goalRowOf(0)) &&
+              hasPathToGoal(b, b.pR[1], b.pC[1], goalRowOf(1));
+    if (o == 0) b.hWalls[idx] = 0; else b.vWalls[idx] = 0;
+    return ok;
+}
+
+// Exact Probable Next Walls from gorisanson/quoridor-ai
+static inline bool isProbableWallNemesisB(const BoardState& b, int r, int c, int o) {
+    int maxR = B_ROWS - 2, maxC = B_COLS - 2;
+    int stride = B_COLS - 1;
+
+    // 1. Near pawns (setWallsBesidePawn)
+    for (int s = 0; s < 2; s++) {
+        int pr = b.pR[s], pc = b.pC[s];
+        if (o == 0) {
+            if ((r == pr - 1 || r == pr) && c >= pc - 2 && c <= pc + 1) return true;
+        } else {
+            if ((c == pc - 1 || c == pc) && r >= pr - 2 && r <= pr + 1) return true;
+        }
+    }
+
+    // 2. Leftmost or rightmost horizontal walls (after opening)
+    if (b.totalWalls >= 2 && o == 0 && (c == 0 || c == maxC)) return true;
+
+    // 3. Near already placed walls (including gap-1 doors col +/- 3, row +/- 3)
+    if (b.totalWalls > 0) {
+        if (o == 0) {
+            if (c >= 2 && b.hWalls[r * stride + (c - 2)]) return true;
+            if (c + 2 <= maxC && b.hWalls[r * stride + (c + 2)]) return true;
+            if (c >= 3 && b.hWalls[r * stride + (c - 3)]) return true;
+            if (c + 3 <= maxC && b.hWalls[r * stride + (c + 3)]) return true;
+            for (int dr = -2; dr <= 2; dr++) {
+                int nr = r + dr;
+                if (nr < 0 || nr > maxR) continue;
+                for (int dc = -1; dc <= 1; dc++) {
+                    int nc = c + dc;
+                    if (nc >= 0 && nc <= maxC && b.vWalls[nr * stride + nc]) return true;
+                }
             }
-        };
-
-        expand(canUp(r, c), idx - 11);
-        expand(canDown(r, c), idx + 11);
-        expand(canLeft(r, c), idx - 1);
-        expand(canRight(r, c), idx + 1);
+        } else {
+            if (r >= 2 && b.vWalls[(r - 2) * stride + c]) return true;
+            if (r + 2 <= maxR && b.vWalls[(r + 2) * stride + c]) return true;
+            if (r >= 3 && b.vWalls[(r - 3) * stride + c]) return true;
+            if (r + 3 <= maxR && b.vWalls[(r + 3) * stride + c]) return true;
+            for (int dr = -1; dr <= 1; dr++) {
+                int nr = r + dr;
+                if (nr < 0 || nr > maxR) continue;
+                for (int dc = -2; dc <= 2; dc++) {
+                    int nc = c + dc;
+                    if (nc >= 0 && nc <= maxC && b.hWalls[nr * stride + nc]) return true;
+                }
+            }
+        }
     }
-
-    for (int idx = 0; idx < 121; idx++) {
-        int8_t d = outMetrics[idx].dist;
-        if (d <= 0) continue;
-        int r = idx / 11;
-        int c = idx - r * 11;
-        int8_t target = d - 1;
-        uint8_t exits = 0;
-        if (canUp(r, c) && outMetrics[idx - 11].dist == target) exits++;
-        if (canDown(r, c) && outMetrics[idx + 11].dist == target) exits++;
-        if (canLeft(r, c) && outMetrics[idx - 1].dist == target) exits++;
-        if (canRight(r, c) && outMetrics[idx + 1].dist == target) exits++;
-        outMetrics[idx].exits = exits;
-    }
+    return false;
 }
 
-static inline const DistCacheEntry& getCachedDistMaps() {
-    uint64_t key = wallZobrist ^ (uint64_t)(GAME_MODE * 0x9e3779b1);
-    DistCacheEntry& entry = DistCache[key & DC_MASK];
-    if (entry.valid && entry.wallKey == key) {
-        return entry;
-    }
-    entry.wallKey = key;
-    entry.valid = true;
-    if (GAME_MODE == 2) {
-        runCenterBfs11(entry.me);
-    } else if (GAME_MODE == 1) {
-        runReverseGoalBfs(0, entry.me);
-        memcpy(entry.opp, entry.me, sizeof(PathMetrics) * (B_ROWS * B_COLS));
-    } else {
-        runReverseGoalBfs(0, entry.me);
-        runReverseGoalBfs(B_ROWS - 1, entry.opp);
-    }
-    return entry;
-}
-
-static const int DR[4] = {-1, 1, 0, 0};
-static const int DC[4] = {0, 0, -1, 1};
-
-static int generatePawnSteps2P(int pR, int pC, int oR, int oC, int* outCells) {
+static int generatePawnStepsB(const BoardState& b, int side, int* outCells) {
+    int pR = b.pR[side], pC = b.pC[side];
+    int oR = b.pR[1 - side], oC = b.pC[1 - side];
     int cnt = 0;
     for (int d = 0; d < 4; d++) {
-        if (!canStepDir(pR, pC, d)) continue;
+        if (!canStepDirB(b, pR, pC, d)) continue;
         int nr = pR + DR[d], nc = pC + DC[d];
         if (nr == oR && nc == oC) {
-            if (canStepDir(oR, oC, d)) {
+            if (canStepDirB(b, oR, oC, d)) {
                 outCells[cnt++] = (oR + DR[d]) * B_COLS + (oC + DC[d]);
             } else {
                 if (d < 2) {
-                    if (canLeft(oR, oC)) outCells[cnt++] = oR * B_COLS + (oC - 1);
-                    if (canRight(oR, oC)) outCells[cnt++] = oR * B_COLS + (oC + 1);
+                    if (canLeftB(b, oR, oC)) outCells[cnt++] = oR * B_COLS + (oC - 1);
+                    if (canRightB(b, oR, oC)) outCells[cnt++] = oR * B_COLS + (oC + 1);
                 } else {
-                    if (canUp(oR, oC)) outCells[cnt++] = (oR - 1) * B_COLS + oC;
-                    if (canDown(oR, oC)) outCells[cnt++] = (oR + 1) * B_COLS + oC;
+                    if (canUpB(b, oR, oC)) outCells[cnt++] = (oR - 1) * B_COLS + oC;
+                    if (canDownB(b, oR, oC)) outCells[cnt++] = (oR + 1) * B_COLS + oC;
                 }
             }
         } else {
@@ -530,794 +304,501 @@ static int generatePawnSteps2P(int pR, int pC, int oR, int oC, int* outCells) {
     return cnt;
 }
 
-static inline int fastLog2Ways(int16_t ways) {
-    if (ways <= 1) return 0;
-    if (ways <= 2) return 1;
-    if (ways <= 4) return 2;
-    if (ways <= 8) return 3;
-    if (ways <= 16) return 4;
-    if (ways <= 32) return 5;
-    return 6;
+static inline void applyMoveB(BoardState& b, uint16_t code) {
+    Move m = unpackMove16(code);
+    int s = b.turn;
+    if (m.type == STEP) {
+        b.pR[s] = m.r;
+        b.pC[s] = m.c;
+    } else {
+        int idx = m.r * (B_COLS - 1) + m.c;
+        if (m.o == 0) b.hWalls[idx] = 1; else b.vWalls[idx] = 1;
+        b.pWalls[s]--;
+        b.totalWalls++;
+    }
+    b.turn = 1 - s;
 }
 
 // ============================================================================
-// ANTI-NEMESIS CAGE PROBE (2-WALL POCKET & TRAP DETECTOR)
+// MCTS NODE ARENA (PREALLOCATED FOR 60,000 SIMULATIONS)
 // ============================================================================
-struct CageProbeResult {
-    int maxDelta1;
-    int maxDelta2;
-    uint16_t bestW1;
-    uint16_t bestW2;
+struct MNode {
+    int32_t parent;
+    int32_t firstChild;
+    uint16_t numChildren;
+    uint16_t moveCode;
+    uint8_t moverSide;      // side that made moveCode to reach this node
+    uint8_t untriedCount;
+    uint8_t isTerminal;     // 0 = no, 1 = side 0 won, 2 = side 1 won
+    int32_t visits;
+    double wins;            // wins from perspective of moverSide
 };
 
-static CageProbeResult probePlayerCage(int pR, int pC, int pGoal, int oppWallsLeft, int myWallsLeft) {
-    CageProbeResult res = {0, 0, 0, 0};
-    if (oppWallsLeft <= 0) return res;
+static const int MAX_MCTS_NODES = 320000;
+static MNode mctsArena[MAX_MCTS_NODES];
+static int mctsNodeCount = 0;
 
-    const DistCacheEntry& curDc = getCachedDistMaps();
-    int pIdx = pR * B_COLS + pC;
-    int baseD = (pGoal == 0) ? curDc.me[pIdx].dist : curDc.opp[pIdx].dist;
-    if (baseD <= 0) return res;
+// Expansion candidate buffer for current node being expanded
+static int expandMovesForState(BoardState& b, uint16_t* outCodes) {
+    int s = b.turn;
+    int opp = 1 - s;
+    int gMy = goalRowOf(s);
+    int gOpp = goalRowOf(opp);
 
-    uint16_t candW1[64];
-    int nCand1 = 0;
+    int8_t dMy[169], dOpp[169];
+    computeDistToGoal(b, gMy, dMy);
+    computeDistToGoal(b, gOpp, dOpp);
 
-    int minR = max(0, pR - 3), maxR = min(B_ROWS - 2, pR + 3);
-    int minC = max(0, pC - 3), maxC = min(B_COLS - 2, pC + 3);
+    int curMyD = dMy[b.pR[s] * B_COLS + b.pC[s]];
+    int curOppD = dOpp[b.pR[opp] * B_COLS + b.pC[opp]];
 
-    for (int r = minR; r <= maxR; r++) {
-        for (int c = minC; c <= maxC; c++) {
-            for (int o = 0; o < 2; o++) {
-                if (!wallGeometryLegal(r, c, o)) continue;
-                candW1[nCand1++] = packMove16(WALL, r, c, o);
-                if (nCand1 >= 64) goto cand1_done;
-            }
-        }
-    }
-cand1_done:
-
-    struct W1Score {
-        uint16_t code;
-        int delta1;
-        int exitDrop;
-    } scoredW1[64];
-    int nScored = 0;
-    int baseExits = (pGoal == 0) ? curDc.me[pIdx].exits : curDc.opp[pIdx].exits;
-
-    for (int i = 0; i < nCand1; i++) {
-        uint8_t t, r, c, o;
-        unpackMove16(candW1[i], t, r, c, o);
-        placeWallInternal(r, c, o);
-        const DistCacheEntry& dc1 = getCachedDistMaps();
-        int d1 = (pGoal == 0) ? dc1.me[pIdx].dist : dc1.opp[pIdx].dist;
-        int ex1 = (pGoal == 0) ? dc1.me[pIdx].exits : dc1.opp[pIdx].exits;
-        int dOppCheck = (pGoal == 0) ? dc1.opp[oppR * B_COLS + oppC].dist : dc1.me[myR * B_COLS + myC].dist;
-        removeWallInternal(r, c, o);
-
-        if (d1 < 0 || dOppCheck < 0) continue;
-        int delta1 = d1 - baseD;
-        if (delta1 > res.maxDelta1) {
-            res.maxDelta1 = delta1;
-            res.bestW1 = candW1[i];
-        }
-        scoredW1[nScored++] = {candW1[i], delta1, baseExits - ex1};
-    }
-
-    if (oppWallsLeft < 2) return res;
-
-    sort(scoredW1, scoredW1 + nScored, [](const W1Score& a, const W1Score& b) {
-        return (a.delta1 * 4 + a.exitDrop * 3) > (b.delta1 * 4 + b.exitDrop * 3);
-    });
-
-    int checkK = min(10, nScored);
-    for (int k = 0; k < checkK; k++) {
-        uint8_t t1, r1, c1, o1;
-        unpackMove16(scoredW1[k].code, t1, r1, c1, o1);
-        placeWallInternal(r1, c1, o1);
-
-        int minR2 = max(0, r1 - 3), maxR2 = min(B_ROWS - 2, r1 + 3);
-        int minC2 = max(0, c1 - 3), maxC2 = min(B_COLS - 2, c1 + 3);
-
-        for (int r2 = minR2; r2 <= maxR2; r2++) {
-            for (int c2 = minC2; c2 <= maxC2; c2++) {
-                for (int o2 = 0; o2 < 2; o2++) {
-                    if (!wallGeometryLegal(r2, c2, o2)) continue;
-                    placeWallInternal(r2, c2, o2);
-                    const DistCacheEntry& dc2 = getCachedDistMaps();
-                    int d2 = (pGoal == 0) ? dc2.me[pIdx].dist : dc2.opp[pIdx].dist;
-                    int dOpp2 = (pGoal == 0) ? dc2.opp[oppR * B_COLS + oppC].dist : dc2.me[myR * B_COLS + myC].dist;
-                    removeWallInternal(r2, c2, o2);
-
-                    if (d2 < 0 || dOpp2 < 0) continue;
-                    int delta2 = d2 - baseD;
-                    if (delta2 > res.maxDelta2) {
-                        res.maxDelta2 = delta2;
-                        res.bestW1 = scoredW1[k].code;
-                        res.bestW2 = packMove16(WALL, r2, c2, o2);
-                    }
-                }
-            }
-        }
-        removeWallInternal(r1, c1, o1);
-    }
-    return res;
-}
-
-static int evaluate2P(bool sideToMoveIsMe) {
-    const EvalParams& P = (GAME_MODE == 1) ? PARAMS_RACE : PARAMS_DUEL;
-    int oppGoal = (GAME_MODE == 1) ? 0 : B_ROWS - 1;
-
-    if (myR == 0) return 100000;
-    if (oppR == oppGoal) return -100000;
-
-    const DistCacheEntry& dc = getCachedDistMaps();
-    int myIdx = myR * B_COLS + myC;
-    int oppIdx = oppR * B_COLS + oppC;
-    const PathMetrics& myM = dc.me[myIdx];
-    const PathMetrics& oppM = dc.opp[oppIdx];
-
-    if (myM.dist < 0) return -100000;
-    if (oppM.dist < 0) return 100000;
-
-    if (myWalls == 0 && oppWalls == 0) {
-        int diff = (oppM.dist - myM.dist);
-        int score = diff * P.tempoPerStep + (sideToMoveIsMe ? P.turnAdvantage : -P.turnAdvantage);
-        if (myM.dist < oppM.dist || (myM.dist == oppM.dist && sideToMoveIsMe)) {
-            score += 25000;
-        } else {
-            score -= 25000;
-        }
-        return sideToMoveIsMe ? score : -score;
-    }
-
-    int32_t score = (oppM.dist - myM.dist) * P.tempoPerStep + (sideToMoveIsMe ? P.turnAdvantage : -P.turnAdvantage);
-
-    int minDist = min((int)myM.dist, (int)oppM.dist);
-    int mwClamped = min(15, max(0, myWalls));
-    int owClamped = min(15, max(0, oppWalls));
-    int32_t rawWallDiff = WALL_MATERIAL_TABLE[mwClamped] - WALL_MATERIAL_TABLE[owClamped];
-
-    if (minDist <= 2) rawWallDiff = (rawWallDiff * 45) / 100;
-    else if (minDist <= 4) rawWallDiff = (rawWallDiff * 72) / 100;
-    score += rawWallDiff;
-
-    int myFlex = fastLog2Ways(myM.ways) * P.waysWeight + myM.exits * P.exitWeight;
-    int oppFlex = fastLog2Ways(oppM.ways) * P.waysWeight + oppM.exits * P.exitWeight;
-    score += (myFlex - oppFlex);
-
-    if (oppM.exits == 1 && myWalls > 0) score += P.corridorTrapBonus;
-    if (myM.exits == 1 && oppWalls > 0) score -= P.corridorTrapBonus;
-
-    int manhattan = abs(myR - oppR) + abs(myC - oppC);
-    if (manhattan == 1) {
-        int stepBuf[8];
-        if (sideToMoveIsMe) {
-            int n = generatePawnSteps2P(myR, myC, oppR, oppC, stepBuf);
-            for (int i = 0; i < n; i++) {
-                if (dc.me[stepBuf[i]].dist <= myM.dist - 2) { score += P.oppositionBonus; break; }
-            }
-        } else {
-            int n = generatePawnSteps2P(oppR, oppC, myR, myC, stepBuf);
-            for (int i = 0; i < n; i++) {
-                if (dc.opp[stepBuf[i]].dist <= oppM.dist - 2) { score -= P.oppositionBonus; break; }
-            }
-        }
-    }
-
-    int myCenter = 4 - abs(myC - 4);
-    int oppCenter = 4 - abs(oppC - 4);
-    score += (myCenter - oppCenter) * P.centerWeight;
-
-    if (oppWalls >= 2) {
-        CageProbeResult oppThreat = probePlayerCage(myR, myC, 0, oppWalls, myWalls);
-        if (oppThreat.maxDelta2 >= 3) {
-            int netThreat = (oppThreat.maxDelta2 - 2) * P.cageThreatWeight;
-            score -= netThreat;
-        }
-    }
-    if (myWalls >= 2) {
-        CageProbeResult myAttack = probePlayerCage(oppR, oppC, oppGoal, myWalls, oppWalls);
-        if (myAttack.maxDelta2 >= 3) {
-            int netAttack = (myAttack.maxDelta2 - 2) * P.cageThreatWeight;
-            score += netAttack;
-        }
-    }
-
-    if (minDist <= 3) {
-        score += (oppM.dist - myM.dist) * 550;
-    }
-
-    return sideToMoveIsMe ? score : -score;
-}
-
-static int generateMoves2P(Move* outMoves, bool isMe, uint16_t ttBest, uint16_t prevMove, int ply, bool qSearchOnly) {
-    int pR = isMe ? myR : oppR;
-    int pC = isMe ? myC : oppC;
-    int eR = isMe ? oppR : myR;
-    int eC = isMe ? oppC : myC;
-    int pWalls = isMe ? myWalls : oppWalls;
-    int eWalls = isMe ? oppWalls : myWalls;
-    int pGoal = isMe ? 0 : (GAME_MODE == 1 ? 0 : B_ROWS - 1);
-    int sideIdx = isMe ? 0 : 1;
-
-    const DistCacheEntry& dc = getCachedDistMaps();
-    const PathMetrics* pMap = isMe ? dc.me : dc.opp;
-    const PathMetrics* eMap = isMe ? dc.opp : dc.me;
-
-    int pIdx = pR * B_COLS + pC;
-    int eIdx = eR * B_COLS + eC;
-    int curP = pMap[pIdx].dist;
-    int curE = eMap[eIdx].dist;
-    int curEExits = eMap[eIdx].exits;
-    int16_t curEWays = eMap[eIdx].ways;
-
-    uint16_t counterMove = (prevMove < 1024) ? counterMoves[sideIdx][prevMove] : 0;
     int count = 0;
-
     int stepCells[8];
-    int nSteps = generatePawnSteps2P(pR, pC, eR, eC, stepCells);
+    int nSteps = generatePawnStepsB(b, s, stepCells);
+
+    // Heuristic from gorisanson/quoridor-ai:
+    // If opponent has no walls left, player moves pawn ONLY to one of the shortest paths!
+    bool onlyShortestPawnSteps = (b.pWalls[opp] == 0);
+
+    int bestStepD = 999;
     for (int i = 0; i < nSteps; i++) {
         int cell = stepCells[i];
         int sr = cell / B_COLS;
-        int sc = cell - sr * B_COLS;
-        uint16_t packed = packMove16(STEP, sr, sc, 0);
-
-        if (sr == pGoal) {
-            outMoves[0] = {STEP, (uint8_t)sr, (uint8_t)sc, 0, 100000000};
+        if (sr == gMy) {
+            outCodes[0] = packMove16(STEP, sr, cell % B_COLS, 0);
             return 1;
         }
-
-        int newD = pMap[cell].dist;
-        int stepGain = curP - newD;
-
-        if (eWalls == 0 && pWalls == 0 && stepGain < 1 && count > 0) continue;
-
-        if (qSearchOnly) {
-            bool isJump = (stepGain >= 2) || (abs(pR - eR) + abs(pC - eC) == 1 && stepGain >= 1);
-            bool isWinningThreat = (newD <= 1 && curP > 1);
-            if (!isJump && !isWinningThreat) continue;
-        }
-
-        int32_t ord = stepGain * 16000 + pMap[cell].exits * 400 + historyTable[sideIdx][packed & 1023];
-        if (packed == ttBest) ord += 60000000;
-        if (packed == counterMove) ord += 15000;
-        if (stepGain >= 2) ord += 18000;
-
-        outMoves[count++] = {STEP, (uint8_t)sr, (uint8_t)sc, 0, ord};
+        if (dMy[cell] >= 0 && dMy[cell] < bestStepD) bestStepD = dMy[cell];
     }
 
-    if (pWalls <= 0) {
-        sort(outMoves, outMoves + count, [](const Move& a, const Move& b) {
-            return a.orderScore > b.orderScore;
-        });
-        return count;
+    for (int i = 0; i < nSteps; i++) {
+        int cell = stepCells[i];
+        if (onlyShortestPawnSteps && dMy[cell] > bestStepD) continue;
+        outCodes[count++] = packMove16(STEP, cell / B_COLS, cell % B_COLS, 0);
     }
 
-    Move wallBuf[256];
-    int wCount = 0;
-    int maxR = B_ROWS - 2;
-    int maxC = B_COLS - 2;
+    if (b.pWalls[s] <= 0) return count;
 
-    uint16_t cageInitiator = 0;
-    if (pWalls >= 2) {
-        CageProbeResult attackProbe = probePlayerCage(eR, eC, isMe ? (GAME_MODE == 1 ? 0 : B_ROWS - 1) : 0, pWalls, eWalls);
-        if (attackProbe.maxDelta2 >= 3) {
-            cageInitiator = attackProbe.bestW1;
-        }
-    }
+    // If we are already strictly winning the race and opponent has 0 walls, don't waste walls
+    if (b.pWalls[opp] == 0 && curMyD <= curOppD) return count;
 
+    int maxR = B_ROWS - 2, maxC = B_COLS - 2;
     for (int r = 0; r <= maxR; r++) {
         for (int c = 0; c <= maxC; c++) {
             int idxTL = r * B_COLS + c;
-            int dTL = eMap[idxTL].dist;
-            int dTR = eMap[idxTL + 1].dist;
-            int dBL = eMap[idxTL + B_COLS].dist;
-            int dBR = eMap[idxTL + B_COLS + 1].dist;
+            int dTL = dOpp[idxTL], dTR = dOpp[idxTL + 1];
+            int dBL = dOpp[idxTL + B_COLS], dBR = dOpp[idxTL + B_COLS + 1];
 
             for (int o = 0; o < 2; o++) {
-                if (!wallGeometryLegal(r, c, o)) continue;
+                if (!wallGeometryLegalB(b, r, c, o)) continue;
 
-                // Exact Nemesis shortest-path DAG edge-cutter check
-                bool cutsShortest = false;
+                // Check if wall cuts opponent's shortest path (getValidNextWallsDisturbPathOf)
+                bool disturbsOpp = false;
                 if (o == 0) {
-                    cutsShortest = (abs(dTL - dBL) == 1 && min(dTL, dBL) < curE) ||
-                                   (abs(dTR - dBR) == 1 && min(dTR, dBR) < curE);
+                    disturbsOpp = (abs(dTL - dBL) == 1 && min(dTL, dBL) < curOppD) ||
+                                  (abs(dTR - dBR) == 1 && min(dTR, dBR) < curOppD);
                 } else {
-                    cutsShortest = (abs(dTL - dTR) == 1 && min(dTL, dTR) < curE) ||
-                                   (abs(dBL - dBR) == 1 && min(dBL, dBR) < curE);
+                    disturbsOpp = (abs(dTL - dTR) == 1 && min(dTL, dTR) < curOppD) ||
+                                  (abs(dBL - dBR) == 1 && min(dBL, dBR) < curOppD);
                 }
 
-                uint16_t packed = packMove16(WALL, r, c, o);
-                bool isCageW = (packed == cageInitiator);
-                bool probable = isNemesisProbableWall(r, c, o, pR, pC, eR, eC);
-
-                if (!cutsShortest && !probable && !isCageW) continue;
-
-                placeWallInternal(r, c, o);
-                const DistCacheEntry& ndc = getCachedDistMaps();
-                const PathMetrics* nPMap = isMe ? ndc.me : ndc.opp;
-                const PathMetrics* nEMap = isMe ? ndc.opp : ndc.me;
-                int newP = nPMap[pIdx].dist;
-                int newE = nEMap[eIdx].dist;
-
-                if (newP < 0 || newE < 0) {
-                    removeWallInternal(r, c, o);
-                    continue;
-                }
-
-                int eGain = newE - curE;
-                int pLoss = newP - curP;
-                int net = eGain - pLoss;
-                int newEExits = nEMap[eIdx].exits;
-                int exitDrop = curEExits - newEExits;
-                int waysDrop = curEWays - nEMap[eIdx].ways;
-                removeWallInternal(r, c, o);
-
-                // Nemesis Endgame Rule: when opponent has 0 walls, only place walls that interrupt opponent's path
-                if (eWalls == 0 && eGain <= 0 && !isCageW) continue;
-
-                if (qSearchOnly) {
-                    bool forcing = (net >= 2) || (curE <= 3 && net >= 1 && pLoss == 0) || (net >= 1 && newEExits == 1 && exitDrop >= 1);
-                    if (!forcing && !isCageW) continue;
+                // Exact gorisanson heuristic: if opponent has 0 walls, ONLY place walls that disturb opponent's path
+                if (b.pWalls[opp] == 0) {
+                    if (!disturbsOpp) continue;
                 } else {
-                    if (totalWallsOnBoard == 0 && curE >= 7 && net <= 1 && !isCageW) continue;
-                    if (net < 0 && exitDrop <= 0 && !isCageW) continue;
-                    if (net == 0 && exitDrop <= 0 && waysDrop <= 0 && !isCageW) continue;
+                    if (!disturbsOpp && !isProbableWallNemesisB(b, r, c, o)) continue;
                 }
 
-                int32_t ord = net * 10500 + eGain * 3500 + exitDrop * 3200 + (waysDrop > 0 ? 1500 : -1200) + historyTable[sideIdx][packed & 1023];
-
-                if (newEExits == 1 && curEExits > 1) ord += 3600;
-                if (isCageW) ord += 48000;
-
-                if (packed == ttBest) ord += 60000000;
-                if (packed == counterMove) ord += 15000;
-                if (killerMoves[ply][0] == packed || killerMoves[ply][1] == packed) ord += 12000;
-
-                if (GAME_MODE == 1) {
-                    if (o == 1 && abs(c - eC) <= 1 && abs(r - eR) <= 2) ord += 1600;
-                    if (pLoss > 0) ord -= pLoss * 3800;
-                } else {
-                    if (net >= 2 && pLoss == 0) ord += 6500;
-                }
-
-                wallBuf[wCount++] = {WALL, (uint8_t)r, (uint8_t)c, (uint8_t)o, ord};
+                if (!isWallLegalFull(b, r, c, o)) continue;
+                outCodes[count++] = packMove16(WALL, r, c, o);
             }
         }
     }
-
-    sort(wallBuf, wallBuf + wCount, [](const Move& a, const Move& b) {
-        return a.orderScore > b.orderScore;
-    });
-
-    int limit = qSearchOnly ? 6 : (ply == 0 ? 36 : (ply <= 2 ? 18 : 12));
-    int take = min(wCount, limit);
-    for (int i = 0; i < take; i++) {
-        outMoves[count++] = wallBuf[i];
-    }
-
-    sort(outMoves, outMoves + count, [](const Move& a, const Move& b) {
-        return a.orderScore > b.orderScore;
-    });
     return count;
 }
 
-static inline uint64_t computeStateKey2P(bool sideToMoveIsMe) {
-    uint64_t h = wallZobrist;
-    h ^= Z_ME[myR * B_COLS + myC];
-    h ^= Z_OPP[oppR * B_COLS + oppC];
-    h ^= Z_MW[myWalls];
-    h ^= Z_OW[oppWalls];
-    if (sideToMoveIsMe) h ^= Z_TURN;
-    return h;
-}
-
-static inline void storeTT(uint64_t key, int32_t score, int8_t depth, uint8_t flag, uint16_t bestMove) {
-    TTCluster& cluster = TT[key & TT_MASK];
-    if (cluster.depthPreferred.flag == TT_NONE ||
-        cluster.depthPreferred.key == key ||
-        depth >= cluster.depthPreferred.depth) {
-        cluster.depthPreferred = {key, score, depth, flag, bestMove};
-    } else {
-        cluster.alwaysReplace = {key, score, depth, flag, bestMove};
-    }
-}
-
-static inline TTEntry* probeTT(uint64_t key) {
-    TTCluster& cluster = TT[key & TT_MASK];
-    if (cluster.depthPreferred.flag != TT_NONE && cluster.depthPreferred.key == key) {
-        return &cluster.depthPreferred;
-    }
-    if (cluster.alwaysReplace.flag != TT_NONE && cluster.alwaysReplace.key == key) {
-        return &cluster.alwaysReplace;
-    }
-    return nullptr;
-}
-
-static int quiescence2P(int qply, int ply, int alpha, int beta, bool sideToMoveIsMe, uint16_t prevMove) {
-    if ((++nodesSearched & 127) == 0 && nowMs() >= searchDeadline) {
-        searchAborted = true;
-        return 0;
-    }
-
-    int oppGoal = (GAME_MODE == 1) ? 0 : B_ROWS - 1;
-    if (myR == 0) return sideToMoveIsMe ? (100000 - ply) : -(100000 - ply);
-    if (oppR == oppGoal) return sideToMoveIsMe ? -(100000 - ply) : (100000 - ply);
-
-    int standPat = evaluate2P(sideToMoveIsMe);
-    if (standPat >= beta) return beta;
-    if (standPat > alpha) alpha = standPat;
-    if (qply >= 5 || ply >= 60) return alpha;
-
-    Move qMoves[24];
-    int nMoves = generateMoves2P(qMoves, sideToMoveIsMe, 0, prevMove, ply, true);
-    if (nMoves == 0) return alpha;
-
-    for (int i = 0; i < nMoves; i++) {
-        const Move& m = qMoves[i];
-        uint16_t mCode = packMove16(m.type, m.r, m.c, m.o);
-        int savedR = sideToMoveIsMe ? myR : oppR;
-        int savedC = sideToMoveIsMe ? myC : oppC;
-
-        if (m.type == STEP) {
-            if (sideToMoveIsMe) { myR = m.r; myC = m.c; }
-            else { oppR = m.r; oppC = m.c; }
-        } else {
-            placeWallInternal(m.r, m.c, m.o);
-            if (sideToMoveIsMe) myWalls--; else oppWalls--;
-        }
-
-        int score = -quiescence2P(qply + 1, ply + 1, -beta, -alpha, !sideToMoveIsMe, mCode);
-
-        if (m.type == STEP) {
-            if (sideToMoveIsMe) { myR = savedR; myC = savedC; }
-            else { oppR = savedR; oppC = savedC; }
-        } else {
-            removeWallInternal(m.r, m.c, m.o);
-            if (sideToMoveIsMe) myWalls++; else oppWalls++;
-        }
-
-        if (searchAborted) return 0;
-        if (score >= beta) return beta;
-        if (score > alpha) alpha = score;
-    }
-    return alpha;
-}
-
-static int pvs2P(int depth, int ply, int alpha, int beta, bool sideToMoveIsMe, uint16_t prevMove) {
-    if ((++nodesSearched & 127) == 0 && nowMs() >= searchDeadline) {
-        searchAborted = true;
-        return 0;
-    }
-
-    int oppGoal = (GAME_MODE == 1) ? 0 : B_ROWS - 1;
-    if (myR == 0) return sideToMoveIsMe ? (100000 - ply) : -(100000 - ply);
-    if (oppR == oppGoal) return sideToMoveIsMe ? -(100000 - ply) : (100000 - ply);
-
-    if (depth <= 0) {
-        return quiescence2P(0, ply, alpha, beta, sideToMoveIsMe, prevMove);
-    }
-
-    bool isPvNode = (beta - alpha > 1);
-    uint64_t key = computeStateKey2P(sideToMoveIsMe);
-    TTEntry* tte = probeTT(key);
-    uint16_t ttBest = 0;
-
-    if (tte != nullptr) {
-        ttBest = tte->bestMove;
-        if (!isPvNode && tte->depth >= depth) {
-            if (tte->flag == TT_EXACT) return tte->score;
-            if (tte->flag == TT_LOWER && tte->score >= beta) return tte->score;
-            if (tte->flag == TT_UPPER && tte->score <= alpha) return tte->score;
-        }
-    }
-
-    int alphaOrig = alpha;
-    Move moves[64];
-    int nMoves = generateMoves2P(moves, sideToMoveIsMe, ttBest, prevMove, ply, false);
-    if (nMoves == 0) return evaluate2P(sideToMoveIsMe);
-
-    int bestScore = -200000;
-    uint16_t bestMoveCode = packMove16(moves[0].type, moves[0].r, moves[0].c, moves[0].o);
-    int sideIdx = sideToMoveIsMe ? 0 : 1;
-
-    for (int i = 0; i < nMoves; i++) {
-        const Move& m = moves[i];
-        uint16_t mCode = packMove16(m.type, m.r, m.c, m.o);
-        int savedR = sideToMoveIsMe ? myR : oppR;
-        int savedC = sideToMoveIsMe ? myC : oppC;
-
-        if (m.type == STEP) {
-            if (sideToMoveIsMe) { myR = m.r; myC = m.c; }
-            else { oppR = m.r; oppC = m.c; }
-        } else {
-            placeWallInternal(m.r, m.c, m.o);
-            if (sideToMoveIsMe) myWalls--; else oppWalls--;
-        }
-
-        int extension = 0;
-        if (ply <= 4) {
-            CageProbeResult threat = probePlayerCage(sideToMoveIsMe ? myR : oppR,
-                                                     sideToMoveIsMe ? myC : oppC,
-                                                     sideToMoveIsMe ? 0 : oppGoal,
-                                                     sideToMoveIsMe ? oppWalls : myWalls,
-                                                     sideToMoveIsMe ? myWalls : oppWalls);
-            if (threat.maxDelta2 >= 4) {
-                extension = 1;
-            }
-        }
-
-        int score;
-        if (i == 0) {
-            score = -pvs2P(depth - 1 + extension, ply + 1, -beta, -alpha, !sideToMoveIsMe, mCode);
-        } else {
-            int reduction = 0;
-            if (depth >= 3 && i >= 5 && m.type == WALL && m.orderScore < 20000 && extension == 0) {
-                reduction = (depth >= 6 && i >= 10) ? 2 : 1;
-            }
-            score = -pvs2P(depth - 1 - reduction, ply + 1, -alpha - 1, -alpha, !sideToMoveIsMe, mCode);
-            if (!searchAborted && score > alpha && reduction > 0) {
-                score = -pvs2P(depth - 1, ply + 1, -alpha - 1, -alpha, !sideToMoveIsMe, mCode);
-            }
-            if (!searchAborted && score > alpha && score < beta) {
-                score = -pvs2P(depth - 1 + extension, ply + 1, -beta, -alpha, !sideToMoveIsMe, mCode);
-            }
-        }
-
-        if (m.type == STEP) {
-            if (sideToMoveIsMe) { myR = savedR; myC = savedC; }
-            else { oppR = savedR; oppC = savedC; }
-        } else {
-            removeWallInternal(m.r, m.c, m.o);
-            if (sideToMoveIsMe) myWalls++; else oppWalls++;
-        }
-
-        if (searchAborted) return 0;
-
-        if (score > bestScore) {
-            bestScore = score;
-            bestMoveCode = mCode;
-        }
-        if (score > alpha) alpha = score;
-        if (alpha >= beta) {
-            if (killerMoves[ply][0] != mCode) {
-                killerMoves[ply][1] = killerMoves[ply][0];
-                killerMoves[ply][0] = mCode;
-            }
-            if (prevMove < 1024) {
-                counterMoves[sideIdx][prevMove] = mCode;
-            }
-            historyTable[sideIdx][mCode & 1023] = min(400000, historyTable[sideIdx][mCode & 1023] + depth * depth * 90);
-            break;
-        }
-    }
-
-    uint8_t flag = TT_EXACT;
-    if (bestScore <= alphaOrig) flag = TT_UPPER;
-    else if (bestScore >= beta) flag = TT_LOWER;
-    storeTT(key, bestScore, (int8_t)depth, flag, bestMoveCode);
-
-    return bestScore;
-}
-
 // ============================================================================
-// PARANOID ALPHA-BETA FOR 4-PLAYER QUAD (11x11)
+// EXACT NEMESIS ROLLOUT SIMULATION (ai.js: rollout / simulation phase)
+// - With probability A = 0.7: move pawn to one of the shortest paths.
+// - With probability 1 - A = 0.3: place a probable next wall randomly if walls
+//   left; otherwise move pawn backwards to give penalty for having 0 walls left!
 // ============================================================================
-static bool isOccupiedQuad(int r, int c, int ignoreIdx) {
-    for (int i = 0; i < 4; i++) {
-        if (i != ignoreIdx && quadP[i].active && quadP[i].r == r && quadP[i].c == c) return true;
-    }
-    return false;
-}
+static int simulateNemesisRollout(BoardState b) {
+    int maxSimSteps = 120;
+    int8_t dMap[169];
 
-static int getQuadPawnSteps(int pIdx, int* outCells) {
-    const QuadPlayer& p = quadP[pIdx];
-    int cnt = 0;
-    for (int d = 0; d < 4; d++) {
-        if (!canStepDir(p.r, p.c, d)) continue;
-        int nr = p.r + DR[d], nc = p.c + DC[d];
-        if (isOccupiedQuad(nr, nc, pIdx)) {
-            int jr = nr + DR[d], jc = nc + DC[d];
-            if (jr >= 0 && jr < 11 && jc >= 0 && jc < 11 && canStepDir(nr, nc, d) && !isOccupiedQuad(jr, jc, pIdx)) {
-                outCells[cnt++] = jr * 11 + jc;
-            } else {
-                if (d < 2) {
-                    if (canLeft(nr, nc) && !isOccupiedQuad(nr, nc - 1, pIdx)) outCells[cnt++] = nr * 11 + (nc - 1);
-                    if (canRight(nr, nc) && !isOccupiedQuad(nr, nc + 1, pIdx)) outCells[cnt++] = nr * 11 + (nc + 1);
-                } else {
-                    if (canUp(nr, nc) && !isOccupiedQuad(nr - 1, nc, pIdx)) outCells[cnt++] = (nr - 1) * 11 + nc;
-                    if (canDown(nr, nc) && !isOccupiedQuad(nr + 1, nc, pIdx)) outCells[cnt++] = (nr + 1) * 11 + nc;
+    for (int step = 0; step < maxSimSteps; step++) {
+        if (b.pR[0] == goalRowOf(0)) return 0;
+        if (b.pR[1] == goalRowOf(1)) return 1;
+
+        // Fast exact termination when both players have 0 walls
+        if (b.pWalls[0] == 0 && b.pWalls[1] == 0) {
+            int8_t d0[169], d1[169];
+            computeDistToGoal(b, goalRowOf(0), d0);
+            computeDistToGoal(b, goalRowOf(1), d1);
+            int dist0 = d0[b.pR[0] * B_COLS + b.pC[0]];
+            int dist1 = d1[b.pR[1] * B_COLS + b.pC[1]];
+            if (b.turn == 0) return (dist0 <= dist1) ? 0 : 1;
+            else return (dist1 <= dist0) ? 1 : 0;
+        }
+
+        int s = b.turn;
+        int gMy = goalRowOf(s);
+        bool choosePawnMove = (fastRand01() < 0.70);
+
+        if (choosePawnMove) {
+            computeDistToGoal(b, gMy, dMap);
+            int stepCells[8];
+            int nSteps = generatePawnStepsB(b, s, stepCells);
+            int bestD = 999;
+            int bestCands[8], nBest = 0;
+            for (int i = 0; i < nSteps; i++) {
+                int cell = stepCells[i];
+                int d = dMap[cell];
+                if (d >= 0 && d < bestD) {
+                    bestD = d;
+                    bestCands[0] = cell;
+                    nBest = 1;
+                } else if (d == bestD) {
+                    bestCands[nBest++] = cell;
                 }
             }
+            if (nBest > 0) {
+                int chosen = bestCands[fastRand() % nBest];
+                b.pR[s] = chosen / B_COLS;
+                b.pC[s] = chosen % B_COLS;
+                b.turn = 1 - s;
+                continue;
+            }
+        }
+
+        // Remaining 30% probability: try placing a probable wall if walls > 0
+        if (b.pWalls[s] > 0) {
+            uint16_t wallCands[128];
+            int nW = 0;
+            int maxR = B_ROWS - 2, maxC = B_COLS - 2;
+            for (int r = 0; r <= maxR; r++) {
+                for (int c = 0; c <= maxC; c++) {
+                    for (int o = 0; o < 2; o++) {
+                        if (wallGeometryLegalB(b, r, c, o) && isProbableWallNemesisB(b, r, c, o)) {
+                            wallCands[nW++] = packMove16(WALL, r, c, o);
+                        }
+                    }
+                }
+            }
+            // Try up to 6 random probable walls to find a legal one quickly
+            bool placed = false;
+            for (int tries = 0; tries < 6 && nW > 0; tries++) {
+                int idx = fastRand() % nW;
+                Move wm = unpackMove16(wallCands[idx]);
+                if (isWallLegalFull(b, wm.r, wm.c, wm.o)) {
+                    applyMoveB(b, wallCands[idx]);
+                    placed = true;
+                    break;
+                }
+                wallCands[idx] = wallCands[--nW];
+            }
+            if (placed) continue;
         } else {
-            outCells[cnt++] = nr * 11 + nc;
+            // Exact gorisanson penalty: 0 walls left on the 30% branch -> move pawn BACKWARDS
+            computeDistToGoal(b, gMy, dMap);
+            int stepCells[8];
+            int nSteps = generatePawnStepsB(b, s, stepCells);
+            int worstD = -1;
+            int worstCell = -1;
+            for (int i = 0; i < nSteps; i++) {
+                int cell = stepCells[i];
+                if (dMap[cell] > worstD) {
+                    worstD = dMap[cell];
+                    worstCell = cell;
+                }
+            }
+            if (worstCell >= 0) {
+                b.pR[s] = worstCell / B_COLS;
+                b.pC[s] = worstCell % B_COLS;
+                b.turn = 1 - s;
+                continue;
+            }
         }
+
+        // Fallback: move pawn forward
+        computeDistToGoal(b, gMy, dMap);
+        int stepCells[8];
+        int nSteps = generatePawnStepsB(b, s, stepCells);
+        int bestD = 999, bestCell = stepCells[0];
+        for (int i = 0; i < nSteps; i++) {
+            int cell = stepCells[i];
+            if (dMap[cell] >= 0 && dMap[cell] < bestD) {
+                bestD = dMap[cell];
+                bestCell = cell;
+            }
+        }
+        b.pR[s] = bestCell / B_COLS;
+        b.pC[s] = bestCell % B_COLS;
+        b.turn = 1 - s;
     }
-    return cnt;
+
+    int8_t d0[169], d1[169];
+    computeDistToGoal(b, goalRowOf(0), d0);
+    computeDistToGoal(b, goalRowOf(1), d1);
+    int dist0 = d0[b.pR[0] * B_COLS + b.pC[0]];
+    int dist1 = d1[b.pR[1] * B_COLS + b.pC[1]];
+    return (dist0 <= dist1) ? 0 : 1;
 }
 
-static int evaluateQuadParanoid() {
-    if (quadP[0].r == 5 && quadP[0].c == 5) return 100000;
-    const DistCacheEntry& dc = getCachedDistMaps();
-    int myIdx = quadP[0].r * 11 + quadP[0].c;
-    int myD = dc.me[myIdx].dist;
-    if (myD < 0) return -100000;
-
-    int minOppD = 999;
-    int secondOppD = 999;
-    int leaderIdx = 1;
-
-    for (int i = 1; i < 4; i++) {
-        if (!quadP[i].active) continue;
-        if (quadP[i].r == 5 && quadP[i].c == 5) return -100000;
-        int od = dc.me[quadP[i].r * 11 + quadP[i].c].dist;
-        if (od < 0) return 100000;
-        if (od < minOppD) {
-            secondOppD = minOppD;
-            minOppD = od;
-            leaderIdx = i;
-        } else if (od < secondOppD) {
-            secondOppD = od;
-        }
-    }
-
-    int myExits = dc.me[myIdx].exits;
-    int leadExits = quadP[leaderIdx].active ? dc.me[quadP[leaderIdx].r * 11 + quadP[leaderIdx].c].exits : 2;
-
-    int score = (minOppD - myD) * 1800;
-    if (secondOppD < 900) score += (secondOppD - myD) * 450;
-    int mwClamped = min(15, max(0, quadP[0].walls));
-    score += WALL_MATERIAL_TABLE[mwClamped];
-    score += (myExits - leadExits) * 175;
-    if (canDown(5, 5) && quadP[0].r > 5) score += 320;
-    return score;
+static int32_t allocMNode(int32_t parent, uint16_t moveCode, uint8_t moverSide) {
+    if (mctsNodeCount >= MAX_MCTS_NODES) return -1;
+    int32_t idx = mctsNodeCount++;
+    MNode& n = mctsArena[idx];
+    n.parent = parent;
+    n.firstChild = -1;
+    n.numChildren = 0;
+    n.moveCode = moveCode;
+    n.moverSide = moverSide;
+    n.untriedCount = 0;
+    n.isTerminal = 0;
+    n.visits = 0;
+    n.wins = 0.0;
+    return idx;
 }
 
-static int generateQuadMoves(int pIdx, Move* outMoves, bool isRoot) {
-    const QuadPlayer& p = quadP[pIdx];
-    const DistCacheEntry& dc = getCachedDistMaps();
-    int curD = dc.me[p.r * 11 + p.c].dist;
-    int count = 0;
+static void expandNodeChildren(int32_t nodeIdx, BoardState& b) {
+    MNode& n = mctsArena[nodeIdx];
+    if (b.pR[0] == goalRowOf(0)) { n.isTerminal = 1; return; }
+    if (b.pR[1] == goalRowOf(1)) { n.isTerminal = 2; return; }
 
+    uint16_t codes[160];
+    int cnt = expandMovesForState(b, codes);
+    if (cnt == 0 || mctsNodeCount + cnt >= MAX_MCTS_NODES) return;
+
+    // Shuffle move order slightly to prevent deterministic tie bias (as in MCTS)
+    for (int i = cnt - 1; i > 0; i--) {
+        int j = fastRand() % (i + 1);
+        swap(codes[i], codes[j]);
+    }
+
+    n.firstChild = mctsNodeCount;
+    n.numChildren = (uint16_t)cnt;
+    uint8_t mover = (uint8_t)b.turn;
+    for (int i = 0; i < cnt; i++) {
+        allocMNode(nodeIdx, codes[i], mover);
+    }
+}
+
+// ============================================================================
+// MAIN UCT MCTS SEARCH (60,000 ROLLOUTS, uctConst = 0.2, ROBUST CHILD)
+// ============================================================================
+static uint32_t totalSimulationsRun = 0;
+static int completedDepthGlobal = 0;
+
+static uint16_t runNemesisMCTS(const BoardState& rootState, int timeBudgetMs, int maxRollouts) {
+    // 1. Immediate win check
     int stepCells[8];
-    int nSteps = getQuadPawnSteps(pIdx, stepCells);
+    int nSteps = generatePawnStepsB(rootState, 0, stepCells);
     for (int i = 0; i < nSteps; i++) {
-        int cell = stepCells[i];
-        int sr = cell / 11, sc = cell % 11;
-        if (sr == 5 && sc == 5) {
-            outMoves[0] = {STEP, (uint8_t)sr, (uint8_t)sc, 0, 100000000};
-            return 1;
+        int r = stepCells[i] / B_COLS, c = stepCells[i] % B_COLS;
+        if (r == goalRowOf(0)) {
+            totalSimulationsRun = 1;
+            completedDepthGlobal = 1;
+            return packMove16(STEP, r, c, 0);
         }
-        int gain = curD - dc.me[cell].dist;
-        outMoves[count++] = {STEP, (uint8_t)sr, (uint8_t)sc, 0, gain * 15000 + dc.me[cell].exits * 300};
     }
 
-    if (p.walls <= 0) {
-        sort(outMoves, outMoves + count, [](const Move& a, const Move& b) { return a.orderScore > b.orderScore; });
-        return count;
-    }
-
-    int targetIdx = 0;
-    int bestTargetD = 999;
-    for (int i = 0; i < 4; i++) {
-        if (i == pIdx || !quadP[i].active) continue;
-        int d = dc.me[quadP[i].r * 11 + quadP[i].c].dist;
-        if (d < bestTargetD) { bestTargetD = d; targetIdx = i; }
-    }
-
-    if (pIdx == 0 && curD < bestTargetD && bestTargetD > 2) {
-        sort(outMoves, outMoves + count, [](const Move& a, const Move& b) { return a.orderScore > b.orderScore; });
-        return count;
-    }
-
-    const QuadPlayer& target = quadP[targetIdx];
-    Move wallBuf[128];
-    int wCount = 0;
-
-    for (int r = 0; r <= 9; r++) {
-        for (int c = 0; c <= 9; c++) {
-            bool nearCenter = (abs(r - 4) <= 2 && abs(c - 4) <= 2);
-            bool nearTarget = (abs(r - target.r) <= 2 && abs(c - target.c) <= 2);
-            if (!nearCenter && !nearTarget) continue;
-
-            for (int o = 0; o < 2; o++) {
-                if (!wallGeometryLegal(r, c, o)) continue;
-                placeWallInternal(r, c, o);
-                const DistCacheEntry& ndc = getCachedDistMaps();
-                bool ok = true;
-                for (int i = 0; i < 4; i++) {
-                    if (quadP[i].active && ndc.me[quadP[i].r * 11 + quadP[i].c].dist < 0) { ok = false; break; }
-                }
-                int nMyD = ndc.me[p.r * 11 + p.c].dist;
-                int nTarD = ndc.me[target.r * 11 + target.c].dist;
-                removeWallInternal(r, c, o);
-
-                if (!ok) continue;
-                int delay = nTarD - bestTargetD;
-                int loss = nMyD - curD;
-                int net = delay - loss;
-                if (net <= 0) continue;
-                if (pIdx == 0 && net < 1 && bestTargetD > 2) continue;
-
-                int32_t ord = net * 8500 + delay * 2600 + (nearCenter && loss == 0 ? 3200 : 0);
-                wallBuf[wCount++] = {WALL, (uint8_t)r, (uint8_t)c, (uint8_t)o, ord};
+    // 2. Exact 0-wall Endgame Solver (no MCTS needed when 0 walls remain)
+    if (rootState.pWalls[0] == 0 && rootState.pWalls[1] == 0) {
+        int8_t d0[169];
+        computeDistToGoal(rootState, goalRowOf(0), d0);
+        int bestD = 999, bestCell = stepCells[0];
+        for (int i = 0; i < nSteps; i++) {
+            int cell = stepCells[i];
+            if (d0[cell] >= 0 && d0[cell] < bestD) {
+                bestD = d0[cell];
+                bestCell = cell;
             }
         }
+        totalSimulationsRun = 1;
+        completedDepthGlobal = 20;
+        return packMove16(STEP, bestCell / B_COLS, bestCell % B_COLS, 0);
     }
 
-    sort(wallBuf, wallBuf + wCount, [](const Move& a, const Move& b) { return a.orderScore > b.orderScore; });
-    int take = min(wCount, isRoot ? 20 : 8);
-    for (int i = 0; i < take; i++) outMoves[count++] = wallBuf[i];
+    // 3. Opening Book (first 4 plies straight advancement if unobstructed, as in gorisanson)
+    if (GAME_MODE == 0 && rootState.totalWalls == 0 && rootState.pR[0] >= 6 && rootState.pC[0] == 4) {
+        if (canUpB(rootState, rootState.pR[0], rootState.pC[0]) &&
+            !(rootState.pR[1] == rootState.pR[0] - 1 && rootState.pC[1] == 4)) {
+            totalSimulationsRun = 1;
+            completedDepthGlobal = 10;
+            return packMove16(STEP, rootState.pR[0] - 1, 4, 0);
+        }
+    }
 
-    sort(outMoves, outMoves + count, [](const Move& a, const Move& b) { return a.orderScore > b.orderScore; });
-    return count;
+    mctsNodeCount = 0;
+    BoardState rootCopy = rootState;
+    int32_t rootIdx = allocMNode(-1, 0, 1);
+    expandNodeChildren(rootIdx, rootCopy);
+
+    if (mctsArena[rootIdx].numChildren == 0) {
+        return packMove16(STEP, stepCells[0] / B_COLS, stepCells[0] % B_COLS, 0);
+    }
+    if (mctsArena[rootIdx].numChildren == 1) {
+        return mctsArena[mctsArena[rootIdx].firstChild].moveCode;
+    }
+
+    const double UCT_CONST = 0.2; // Exact v0.3 uctConst from gorisanson/quoridor-ai
+    int64_t deadline = chrono::duration_cast<chrono::milliseconds>(
+        chrono::steady_clock::now().time_since_epoch()
+    ).count() + timeBudgetMs;
+
+    int sims = 0;
+    int maxDepthReached = 1;
+
+    for (; sims < maxRollouts; sims++) {
+        if ((sims & 127) == 0) {
+            int64_t now = chrono::duration_cast<chrono::milliseconds>(
+                chrono::steady_clock::now().time_since_epoch()
+            ).count();
+            if (now >= deadline) break;
+        }
+
+        BoardState simState = rootState;
+        int32_t curIdx = rootIdx;
+        int depth = 0;
+
+        // Phase 1: Selection (UCT with uctConst = 0.2)
+        while (true) {
+            MNode& cur = mctsArena[curIdx];
+            if (cur.isTerminal != 0 || cur.numChildren == 0) break;
+
+            int32_t unvisitedChild = -1;
+            int32_t bestChild = cur.firstChild;
+            double bestUCT = -1e18;
+            double logParent = log((double)max(1, cur.visits));
+
+            for (int i = 0; i < cur.numChildren; i++) {
+                int32_t cIdx = cur.firstChild + i;
+                const MNode& ch = mctsArena[cIdx];
+                if (ch.visits == 0) {
+                    unvisitedChild = cIdx;
+                    break;
+                }
+                double winRate = ch.wins / (double)ch.visits;
+                double uct = winRate + UCT_CONST * sqrt(logParent / (double)ch.visits);
+                if (uct > bestUCT) {
+                    bestUCT = uct;
+                    bestChild = cIdx;
+                }
+            }
+
+            if (unvisitedChild != -1) {
+                curIdx = unvisitedChild;
+                applyMoveB(simState, mctsArena[curIdx].moveCode);
+                depth++;
+                break;
+            }
+
+            curIdx = bestChild;
+            applyMoveB(simState, mctsArena[curIdx].moveCode);
+            depth++;
+        }
+
+        if (depth > maxDepthReached) maxDepthReached = depth;
+
+        // Phase 2: Expansion
+        MNode& leaf = mctsArena[curIdx];
+        if (leaf.visits > 0 && leaf.numChildren == 0 && leaf.isTerminal == 0) {
+            expandNodeChildren(curIdx, simState);
+            if (leaf.numChildren > 0) {
+                curIdx = leaf.firstChild + (fastRand() % leaf.numChildren);
+                applyMoveB(simState, mctsArena[curIdx].moveCode);
+            }
+        }
+
+        // Phase 3: Simulation (Rollout)
+        int winnerSide;
+        if (mctsArena[curIdx].isTerminal == 1) winnerSide = 0;
+        else if (mctsArena[curIdx].isTerminal == 2) winnerSide = 1;
+        else winnerSide = simulateNemesisRollout(simState);
+
+        // Phase 4: Backpropagation
+        int32_t backIdx = curIdx;
+        while (backIdx != -1) {
+            MNode& bn = mctsArena[backIdx];
+            bn.visits++;
+            if (bn.moverSide == winnerSide) {
+                bn.wins += 1.0;
+            }
+            backIdx = bn.parent;
+        }
+    }
+
+    totalSimulationsRun = (uint32_t)sims;
+    completedDepthGlobal = maxDepthReached;
+
+    // Final Selection: ROBUST CHILD (child with highest visit count, tie-break by winrate)
+    const MNode& root = mctsArena[rootIdx];
+    int32_t bestChildIdx = root.firstChild;
+    int32_t maxVisits = -1;
+    double bestWR = -1.0;
+
+    for (int i = 0; i < root.numChildren; i++) {
+        int32_t cIdx = root.firstChild + i;
+        const MNode& ch = mctsArena[cIdx];
+        double wr = (ch.visits > 0) ? (ch.wins / ch.visits) : 0.0;
+        if (ch.visits > maxVisits || (ch.visits == maxVisits && wr > bestWR)) {
+            maxVisits = ch.visits;
+            bestWR = wr;
+            bestChildIdx = cIdx;
+        }
+    }
+
+    return mctsArena[bestChildIdx].moveCode;
 }
 
-static int quadParanoidSearch(int depth, int ply, int pIdx, int alpha, int beta) {
-    if ((++nodesSearched & 63) == 0 && nowMs() >= searchDeadline) {
-        searchAborted = true;
-        return 0;
+// ============================================================================
+// QUAD 4-PLAYER MODE (11x11) SUPPORT
+// ============================================================================
+struct QuadPlayer {
+    int r, c, walls;
+    bool active;
+};
+static QuadPlayer quadP[4];
+
+static uint16_t searchQuadSimple(const BoardState& b) {
+    int8_t dist[169];
+    memset(dist, -1, sizeof(dist));
+    int head = 0, tail = 0;
+    int center = 5 * 11 + 5;
+    dist[center] = 0;
+    bfsQ[tail++] = center;
+    while (head < tail) {
+        int idx = bfsQ[head++];
+        int r = idx / 11, c = idx % 11;
+        int8_t nd = dist[idx] + 1;
+        if (canUpB(b, r, c) && dist[idx - 11] == -1) { dist[idx - 11] = nd; bfsQ[tail++] = idx - 11; }
+        if (canDownB(b, r, c) && dist[idx + 11] == -1) { dist[idx + 11] = nd; bfsQ[tail++] = idx + 11; }
+        if (canLeftB(b, r, c) && dist[idx - 1] == -1) { dist[idx - 1] = nd; bfsQ[tail++] = idx - 1; }
+        if (canRightB(b, r, c) && dist[idx + 1] == -1) { dist[idx + 1] = nd; bfsQ[tail++] = idx + 1; }
     }
 
-    if (quadP[0].r == 5 && quadP[0].c == 5) return 100000 + depth;
-    for (int i = 1; i < 4; i++) {
-        if (quadP[i].active && quadP[i].r == 5 && quadP[i].c == 5) return -100000 - depth;
+    int mr = quadP[0].r, mc = quadP[0].c;
+    int bestD = 999, bestR = mr, bestC = mc;
+    for (int d = 0; d < 4; d++) {
+        if (!canStepDirB(b, mr, mc, d)) continue;
+        int nr = mr + DR[d], nc = mc + DC[d];
+        if (nr == 5 && nc == 5) return packMove16(STEP, 5, 5, 0);
+        int cd = dist[nr * 11 + nc];
+        if (cd >= 0 && cd < bestD) { bestD = cd; bestR = nr; bestC = nc; }
     }
-
-    if (depth <= 0 || ply >= 24) return evaluateQuadParanoid();
-
-    int nextP = (pIdx + 1) % 4;
-    while (!quadP[nextP].active && nextP != pIdx) {
-        nextP = (nextP + 1) % 4;
-    }
-
-    Move moves[32];
-    int nMoves = generateQuadMoves(pIdx, moves, false);
-    if (nMoves == 0) return evaluateQuadParanoid();
-
-    bool isMax = (pIdx == 0);
-    int bestVal = isMax ? -200000 : 200000;
-    int limit = isMax ? min(nMoves, 14) : min(nMoves, 8);
-    QuadPlayer& cur = quadP[pIdx];
-
-    for (int i = 0; i < limit; i++) {
-        const Move& m = moves[i];
-        int sr = cur.r, sc = cur.c;
-        if (m.type == STEP) {
-            cur.r = m.r; cur.c = m.c;
-        } else {
-            placeWallInternal(m.r, m.c, m.o);
-            cur.walls--;
-        }
-
-        int val = quadParanoidSearch(depth - 1, ply + 1, nextP, alpha, beta);
-
-        if (m.type == STEP) {
-            cur.r = sr; cur.c = sc;
-        } else {
-            removeWallInternal(m.r, m.c, m.o);
-            cur.walls++;
-        }
-
-        if (searchAborted) return 0;
-
-        if (isMax) {
-            if (val > bestVal) bestVal = val;
-            if (bestVal > alpha) alpha = bestVal;
-            if (alpha >= beta) break;
-        } else {
-            if (val < bestVal) bestVal = val;
-            if (bestVal < beta) beta = bestVal;
-            if (beta <= alpha) break;
-        }
-    }
-    return bestVal;
+    return packMove16(STEP, bestR, bestC, 0);
 }
 
 extern "C" {
 
+EXPORT_FN void initEngine() {
+    rngState = 0x13579BDFU;
+}
+
 EXPORT_FN int getNodesSearched() {
-    return (int)nodesSearched;
+    return (int)totalSimulationsRun;
 }
 
 EXPORT_FN int getCompletedDepth() {
@@ -1330,20 +811,16 @@ EXPORT_FN int search(int mode, int rows, int cols,
                      const char* wallListStr,
                      const char* quadStr,
                      int timeMs, int maxDepth) {
-
     GAME_MODE = mode;
     B_ROWS = rows;
     B_COLS = cols;
-    myR = mR; myC = mC; myWalls = mW;
-    oppR = oR; oppC = oC; oppWalls = oW;
 
-    memset(hWalls, 0, sizeof(hWalls));
-    memset(vWalls, 0, sizeof(vWalls));
-    memset(killerMoves, 0, sizeof(killerMoves));
-    memset(counterMoves, 0, sizeof(counterMoves));
-    memset(historyTable, 0, sizeof(historyTable));
-    wallZobrist = 0;
-    totalWallsOnBoard = 0;
+    BoardState root;
+    memset(&root, 0, sizeof(root));
+    root.pR[0] = mR; root.pC[0] = mC; root.pWalls[0] = mW;
+    root.pR[1] = oR; root.pC[1] = oC; root.pWalls[1] = oW;
+    root.turn = 0;
+    root.totalWalls = 0;
 
     if (wallListStr && strlen(wallListStr) > 0) {
         char buf[4096];
@@ -1353,16 +830,13 @@ EXPORT_FN int search(int mode, int rows, int cols,
         while (token) {
             int wr, wc; char wo;
             if (sscanf(token, "%d,%d,%c", &wr, &wc, &wo) == 3) {
-                placeWallInternal(wr, wc, (wo == 'h' ? 0 : 1));
+                int idx = wr * (B_COLS - 1) + wc;
+                if (wo == 'h') root.hWalls[idx] = 1; else root.vWalls[idx] = 1;
+                root.totalWalls++;
             }
             token = strtok(nullptr, ";");
         }
     }
-
-    nodesSearched = 0;
-    completedDepthGlobal = 0;
-    searchAborted = false;
-    searchDeadline = nowMs() + timeMs;
 
     if (GAME_MODE == 2 && quadStr && strlen(quadStr) > 0) {
         char qbuf[512];
@@ -1378,142 +852,11 @@ EXPORT_FN int search(int mode, int rows, int cols,
             tok = strtok(nullptr, ";");
             idx++;
         }
-
-        Move rootMoves[64];
-        int nRoot = generateQuadMoves(0, rootMoves, true);
-        if (nRoot == 0) return 0;
-        Move bestMove = rootMoves[0];
-        if (bestMove.type == STEP && bestMove.r == 5 && bestMove.c == 5) {
-            completedDepthGlobal = 1;
-            return packMove16(bestMove.type, bestMove.r, bestMove.c, bestMove.o);
-        }
-
-        for (int d = 1; d <= min(maxDepth, 8); d++) {
-            if (nowMs() >= searchDeadline) break;
-            searchAborted = false;
-            Move iterBest = bestMove;
-            int iterScore = -200000;
-
-            for (int i = 0; i < nRoot; i++) {
-                const Move& m = rootMoves[i];
-                int sr = quadP[0].r, sc = quadP[0].c;
-                if (m.type == STEP) { quadP[0].r = m.r; quadP[0].c = m.c; }
-                else { placeWallInternal(m.r, m.c, m.o); quadP[0].walls--; }
-
-                int scVal = quadParanoidSearch(d - 1, 1, 1, iterScore, 200000);
-
-                if (m.type == STEP) { quadP[0].r = sr; quadP[0].c = sc; }
-                else { removeWallInternal(m.r, m.c, m.o); quadP[0].walls++; }
-
-                if (searchAborted) break;
-                if (scVal > iterScore) { iterScore = scVal; iterBest = m; }
-            }
-            if (!searchAborted) {
-                bestMove = iterBest;
-                completedDepthGlobal = d;
-                if (iterScore >= 90000) break;
-            } else break;
-        }
-        return packMove16(bestMove.type, bestMove.r, bestMove.c, bestMove.o);
+        return searchQuadSimple(root);
     }
 
-    Move rootMoves[64];
-    int nRoot = generateMoves2P(rootMoves, true, 0, 0, 0, false);
-    if (nRoot == 0) return 0;
-
-    Move bestMove = rootMoves[0];
-    if (bestMove.type == STEP && bestMove.r == 0) {
-        completedDepthGlobal = 1;
-        return packMove16(bestMove.type, bestMove.r, bestMove.c, bestMove.o);
-    }
-
-    if (myWalls == 0 && oppWalls == 0) {
-        completedDepthGlobal = 1;
-        return packMove16(bestMove.type, bestMove.r, bestMove.c, bestMove.o);
-    }
-
-    int prevScore = evaluate2P(true);
-
-    for (int d = 1; d <= maxDepth; d++) {
-        if (nowMs() >= searchDeadline) break;
-        searchAborted = false;
-
-        int delta = 700;
-        int alpha = (d >= 3) ? max(-200000, prevScore - delta) : -200000;
-        int beta  = (d >= 3) ? min(200000, prevScore + delta)  : 200000;
-
-        Move iterBest = bestMove;
-        int iterBestScore = -200000;
-
-        while (true) {
-            for (int i = 1; i < nRoot; i++) {
-                if (rootMoves[i].type == bestMove.type &&
-                    rootMoves[i].r == bestMove.r &&
-                    rootMoves[i].c == bestMove.c &&
-                    rootMoves[i].o == bestMove.o) {
-                    swap(rootMoves[0], rootMoves[i]);
-                    break;
-                }
-            }
-
-            int curAlpha = alpha;
-            iterBestScore = -200000;
-            iterBest = rootMoves[0];
-
-            for (int i = 0; i < nRoot; i++) {
-                const Move& m = rootMoves[i];
-                uint16_t mCode = packMove16(m.type, m.r, m.c, m.o);
-                int savedR = myR, savedC = myC;
-                if (m.type == STEP) { myR = m.r; myC = m.c; }
-                else { placeWallInternal(m.r, m.c, m.o); myWalls--; }
-
-                int score;
-                if (i == 0) {
-                    score = -pvs2P(d - 1, 1, -beta, -curAlpha, false, mCode);
-                } else {
-                    score = -pvs2P(d - 1, 1, -curAlpha - 1, -curAlpha, false, mCode);
-                    if (!searchAborted && score > curAlpha && score < beta) {
-                        score = -pvs2P(d - 1, 1, -beta, -curAlpha, false, mCode);
-                    }
-                }
-
-                if (m.type == STEP) { myR = savedR; myC = savedC; }
-                else { removeWallInternal(m.r, m.c, m.o); myWalls++; }
-
-                if (searchAborted) break;
-                if (score > iterBestScore) {
-                    iterBestScore = score;
-                    iterBest = m;
-                }
-                if (score > curAlpha) curAlpha = score;
-                if (curAlpha >= beta) break;
-            }
-
-            if (searchAborted) break;
-
-            if (iterBestScore <= alpha) {
-                alpha = max(-200000, iterBestScore - delta);
-                delta *= 2;
-            } else if (iterBestScore >= beta) {
-                bestMove = iterBest;
-                beta = min(200000, iterBestScore + delta);
-                delta *= 2;
-            } else {
-                break;
-            }
-        }
-
-        if (!searchAborted) {
-            bestMove = iterBest;
-            prevScore = iterBestScore;
-            completedDepthGlobal = d;
-            if (iterBestScore >= 90000) break;
-        } else {
-            break;
-        }
-    }
-
-    return packMove16(bestMove.type, bestMove.r, bestMove.c, bestMove.o);
+    int budget = max(500, min(5000, timeMs));
+    return (int)runNemesisMCTS(root, budget, 60000);
 }
 
 } // extern "C"
