@@ -1,0 +1,1432 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b111e">
+<title>WallRush GrandMaster Engine Pro</title>
+<style>
+:root{
+  --bg:#0b111e;--panel:#151f32;--panel2:#1c2940;--text:#eef4ff;--muted:#8b9ab3;--line:#2b3a54;
+  --blue:#347fff;--red:#e33b50;--green:#2ecc71;--yellow:#e2a924;--mint:#39e0a1;
+  --board:#111a29;--boardLine:#34445c;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;margin:0;padding:0}
+html,body{width:100%;height:100%;min-height:100%;background:var(--bg);color:var(--text);font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+body{padding:env(safe-area-inset-top) 8px env(safe-area-inset-bottom)}
+button,input{font:inherit;color:inherit;border:0;outline:none}
+button{user-select:none}
+
+#appBlocker{
+  position:fixed;
+  inset:0;
+  z-index:999999;
+  background:#0b111e;
+  display:none;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  padding:24px;
+  text-align:center;
+  color:#fff;
+}
+.blocker-card{
+  width:min(100%,360px);
+  background:#131d30;
+  border:1px solid #263854;
+  border-radius:20px;
+  padding:22px 18px;
+  box-shadow:0 16px 40px #000a;
+}
+.token-box{display:flex;gap:6px;margin-top:14px}
+.token-input{
+  flex:1;height:38px;background:#0b111e;border:1px solid #2b3e5e;border-radius:10px;padding:0 10px;font-size:12px;color:#eef4ff;
+}
+.token-btn{
+  height:38px;padding:0 14px;border-radius:10px;background:#2ecc71;color:#082012;font-weight:900;font-size:12px;cursor:pointer;
+}
+
+.app{
+  width:min(100%,680px);
+  height:100dvh;
+  margin:auto;
+  padding:4px 0;
+  display:flex;
+  flex-direction:column;
+  overflow:hidden;
+  gap:5px;
+}
+
+.top{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex:0 0 30px;
+  height:30px;
+  width:100%;
+}
+.brand{display:flex;align-items:center;gap:6px}
+.brand-mark{width:25px;height:25px;border-radius:7px;background:linear-gradient(145deg,#3b86ff,#195bd4);box-shadow:0 3px 8px #1c61d055;display:grid;grid-template-columns:1fr 1fr;gap:2px;padding:3px}
+.brand-mark i{background:#fff;border-radius:1.5px}
+.brand-name{font-size:15.5px;font-weight:950;letter-spacing:-.4px}
+
+.top-actions{display:flex;gap:5px}
+.resign-btn{
+  background:#261824;border:1px solid #5a2634;color:#ff7a88;border-radius:8px;padding:0 9px;height:27px;font-size:11px;font-weight:900;cursor:pointer;display:flex;align-items:center;gap:4px;
+}
+.skip-btn{
+  background:#1c2940;border:1px solid #334a70;color:#a9c5ff;border-radius:8px;padding:0 8px;height:27px;font-size:10.5px;font-weight:900;cursor:pointer;display:none;align-items:center;
+}
+
+.control-bar{display:flex;gap:5px;align-items:center;width:100%;flex:0 0 28px;height:28px}
+.ctrl-btn{
+  background:#18243a;border:1px solid #2b3d58;color:#eef4ff;border-radius:8px;height:28px;padding:0 7px;font-size:10.5px;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:4px;white-space:nowrap;flex:1 1 0;min-width:0;
+}
+.ctrl-btn:active{background:#233552;transform:scale(0.98)}
+
+.turn-badge{padding:2px 5px;border-radius:4px;font-size:9.5px;font-weight:950;color:#fff}
+.turn-badge.blue{background:#2768dd}
+.turn-badge.red{background:#bd263a}
+.turn-badge.green{background:#1b9a52}
+.turn-badge.yellow{background:#b8830d}
+
+.finish-bar-wrap{flex:0 0 12px;height:12px;display:none;align-items:center;justify-content:center}
+.finish-bar-wrap.visible{display:flex}
+.finish-bar{display:flex;align-items:center;gap:8px;width:100%}
+.finish-line{flex:1;height:1.5px;background:#1e8e60;box-shadow:0 0 6px rgba(30,142,96,.4)}
+.finish-label{font-size:10px;font-weight:950;color:#1ebf7c;letter-spacing:2.5px}
+
+.players-wrap{position:relative;flex:0 0 auto}
+.players{display:grid;grid-template-columns:repeat(2, minmax(0, 1fr));gap:5px;width:100%}
+.player{
+  height:40px;width:100%;min-width:0;background:var(--panel);border:2px solid transparent;border-radius:11px;padding:2px 8px;display:flex;align-items:center;gap:6px;position:relative;user-select:none;transition:all .2s ease;
+}
+.players.quad-grid .player{height:34px;border-radius:10px;cursor:pointer}
+.player.eliminated{opacity:.35;filter:grayscale(.85)}
+
+.player.is-blue{background:linear-gradient(135deg,#2a5496,#1d3b6e)}
+.player.is-red{background:linear-gradient(135deg,#c93b4b,#941e2c)}
+.player.is-green{background:linear-gradient(135deg,#1f8b4d,#146135)}
+.player.is-yellow{background:linear-gradient(135deg,#b58519,#805b0b)}
+
+.player.active{border-color:#fff!important;box-shadow:0 0 0 2px #ffffff33,0 4px 12px #0008}
+
+.player .ball{width:22px;height:22px;border-radius:50%;flex:none;box-shadow:inset -3px -4px 6px #0008,inset 2px 2px 5px #fff8,0 2px 6px #0008}
+.ball.blue{background:radial-gradient(circle at 30% 23%,#bcdcff,#4e91ff 42%,#1646a1)}
+.ball.red{background:radial-gradient(circle at 30% 23%,#ffd0d4,#ff6370 42%,#a7192b)}
+.ball.green{background:radial-gradient(circle at 30% 23%,#c6ffe0,#38d97c 42%,#0e6f38)}
+.ball.yellow{background:radial-gradient(circle at 30% 23%,#fff2bd,#f3b932 42%,#916205)}
+
+.ptext{min-width:0;flex:1 1 0;display:flex;align-items:center;justify-content:space-between;gap:4px}
+.pname{font-size:11px;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.pmeta{font-size:10.5px;color:#eaf1ff;font-weight:900;white-space:nowrap}
+
+.board-frame{
+  position:relative;flex:1 1 auto;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden;
+}
+
+.board-shell{
+  position:relative;border-radius:16px;overflow:hidden;background:var(--board);box-shadow:inset 0 0 0 1px #26354c,0 6px 20px #0008;flex:0 0 auto;
+}
+
+.board-shell.mode-race:after{
+  content:"";position:absolute;inset:0;pointer-events:none;z-index:2;border-top:3px solid #2ae48f;
+  background:linear-gradient(to bottom, rgba(30,191,124,.22) 0%, rgba(30,191,124,.06) 12%, transparent 25%);
+}
+
+.edge-glow{position:absolute;inset:0;pointer-events:none;z-index:2;opacity:0;transition:opacity .25s}
+.edge-glow.on{opacity:1}
+.edge-bottom.blue{box-shadow:inset 0 -4px 0 #347fff, inset 0 -14px 22px -6px rgba(52,127,255,.55)}
+.edge-bottom.red{box-shadow:inset 0 -4px 0 #e33b50, inset 0 -14px 22px -6px rgba(227,59,80,.55)}
+.edge-bottom.green{box-shadow:inset 0 -4px 0 #2ecc71, inset 0 -14px 22px -6px rgba(46,204,113,.55)}
+.edge-bottom.yellow{box-shadow:inset 0 -4px 0 #f1b82d, inset 0 -14px 22px -6px rgba(241,184,45,.55)}
+
+.edge-top.blue{box-shadow:inset 0 4px 0 #347fff, inset 0 14px 22px -6px rgba(52,127,255,.55)}
+.edge-top.red{box-shadow:inset 0 4px 0 #e33b50, inset 0 14px 22px -6px rgba(227,59,80,.55)}
+.edge-top.green{box-shadow:inset 0 4px 0 #2ecc71, inset 0 14px 22px -6px rgba(46,204,113,.55)}
+.edge-top.yellow{box-shadow:inset 0 4px 0 #f1b82d, inset 0 14px 22px -6px rgba(241,184,45,.55)}
+
+.edge-left.blue{box-shadow:inset 4px 0 0 #347fff, inset 14px 0 22px -6px rgba(52,127,255,.55)}
+.edge-left.red{box-shadow:inset 4px 0 0 #e33b50, inset 14px 0 22px -6px rgba(227,59,80,.55)}
+.edge-left.green{box-shadow:inset 4px 0 0 #2ecc71, inset 14px 0 22px -6px rgba(46,204,113,.55)}
+.edge-left.yellow{box-shadow:inset 4px 0 0 #f1b82d, inset 14px 0 22px -6px rgba(241,184,45,.55)}
+
+.edge-right.blue{box-shadow:inset -4px 0 0 #347fff, inset -14px 0 22px -6px rgba(52,127,255,.55)}
+.edge-right.red{box-shadow:inset -4px 0 0 #e33b50, inset -14px 0 22px -6px rgba(227,59,80,.55)}
+.edge-right.green{box-shadow:inset -4px 0 0 #2ecc71, inset -14px 0 22px -6px rgba(46,204,113,.55)}
+.edge-right.yellow{box-shadow:inset -4px 0 0 #f1b82d, inset -14px 0 22px -6px rgba(241,184,45,.55)}
+
+.board-grid{position:absolute;inset:0;display:grid;z-index:1}
+.cell{
+  position:relative;border-right:1px solid #2e3d54;border-bottom:1px solid #2e3d54;display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:manipulation;
+}
+.cell.quad-goal:before{
+  content:"";position:absolute;inset:3px;border-radius:7px;background:radial-gradient(circle, rgba(243,189,50,.38) 0%, rgba(168,118,14,.25) 100%);border:2px solid #e7b53b;box-shadow:0 0 12px rgba(243,189,50,.45), inset 0 0 6px rgba(255,215,90,.4);pointer-events:none;
+}
+
+.cell.legal:after{
+  content:"";width:9px;height:9px;border-radius:50%;background:#52e9b6;box-shadow:0 0 8px #39e0a1cc;animation:dotPop .18s ease-out;z-index:4;
+}
+@keyframes dotPop{from{transform:scale(0.3);opacity:0}to{transform:scale(1);opacity:1}}
+
+.cell.engine{background:#39e0a122!important;position:relative}
+.cell.engine:before{content:"";position:absolute;inset:2px;border:2px solid #52e9b6;border-radius:6px;box-shadow:0 0 10px #39e0a1aa,inset 0 0 5px #39e0a133;animation:pulseBest 1.1s ease-in-out infinite;pointer-events:none;z-index:5}
+.cell.engine:after{content:"BEST";position:absolute;right:1px;top:1px;color:#eafff7;background:#159b70;border-radius:3px;padding:1px 2px;font-size:5.5px;font-weight:950;z-index:7}
+@keyframes pulseBest{50%{transform:scale(.93);opacity:.72}}
+
+.piece-layer{position:absolute;inset:0;pointer-events:none;z-index:6}
+.board-piece{
+  position:absolute;border-radius:50%;transform:translate(-50%,-50%);box-shadow:inset -4px -5px 8px #0008,inset 3px 3px 6px #fff9,0 5px 10px #0009;transition:left .2s cubic-bezier(0.34,1.3,0.64,1), top .2s cubic-bezier(0.34,1.3,0.64,1);
+}
+.board-piece.active-turn{box-shadow:0 0 0 3px #fff, 0 0 12px #fff9, inset -4px -5px 8px #0008!important}
+.board-piece.blue{background:radial-gradient(circle at 29% 22%,#d5e9ff,#3987ff 45%,#174ba9)!important}
+.board-piece.red{background:radial-gradient(circle at 29% 22%,#ffd9dc,#e84859 45%,#9e1729)!important}
+.board-piece.green{background:radial-gradient(circle at 29% 22%,#d2ffe6,#2ecc71 45%,#116936)!important}
+.board-piece.yellow{background:radial-gradient(circle at 29% 22%,#fff3c4,#f0b429 45%,#8c5e05)!important}
+
+.wall-layer{position:absolute;inset:0;z-index:10;pointer-events:none}
+.wall-piece{
+  position:absolute;border-radius:4px;background:linear-gradient(180deg,#5b6f94,#2b3b5c);border:1.5px solid #8399bf;box-shadow:0 3px 8px #0008,inset 1px 1px 2px #fff4;pointer-events:none;animation:wallDrop .18s cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+.wall-piece.color-blue{background:linear-gradient(180deg,#4f95ff,#1f56b5);border-color:#9ec5ff;box-shadow:0 0 8px rgba(52,127,255,.45)}
+.wall-piece.color-red{background:linear-gradient(180deg,#ff5c6f,#b51f32);border-color:#ffa3ae;box-shadow:0 0 8px rgba(227,59,80,.45)}
+.wall-piece.color-green{background:linear-gradient(180deg,#3ee686,#168a47);border-color:#9effc5;box-shadow:0 0 8px rgba(46,204,113,.45)}
+.wall-piece.color-yellow{background:linear-gradient(180deg,#f7c346,#ad7809);border-color:#ffe399;box-shadow:0 0 8px rgba(241,184,45,.45)}
+
+@keyframes wallDrop{0%{transform:translate(-50%,-50%) scale(0.5);opacity:0}100%{transform:translate(-50%,-50%) scale(1);opacity:1}}
+
+.wall-piece.h{height:7px;transform:translate(-50%,-50%)}
+.wall-piece.v{width:7px;transform:translate(-50%,-50%)}
+.wall-piece.engine{background:linear-gradient(180deg,#58efb9,#168e67)!important;border-color:#baffea!important;box-shadow:0 0 14px #39e0a1dd,0 3px 8px #0006!important;z-index:15}
+.wall-piece.ghost{opacity:.95;border-style:dashed;filter:drop-shadow(0 6px 6px #0009);z-index:20;animation:none}
+.wall-piece.ghost.bad{background:linear-gradient(180deg,#ff6b79,#9e1f31)!important;border-color:#ffadb5!important;box-shadow:0 0 12px #ff5364aa!important}
+
+.bottom-container{display:flex;flex-direction:column;gap:5px;flex:0 0 auto}
+.bottom-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.apply{height:38px;border-radius:11px;background:linear-gradient(135deg,#3c86ff,#285bc6);color:#fff;font-weight:950;font-size:12px;box-shadow:0 4px 12px #2768dd33;cursor:pointer}
+.apply:disabled{opacity:.32;filter:grayscale(.7);box-shadow:none;cursor:default}
+.undo{height:38px;border-radius:11px;background:var(--panel);border:1px solid var(--line);font-weight:900;font-size:12px;cursor:pointer}
+
+.dock{background:#121c2b;color:#dbe5f5;border-radius:12px;padding:4px 8px;display:grid;grid-template-columns:44px 1fr 1fr;gap:6px;border:1px solid #24344c;width:100%;touch-action:none}
+.dock-count{display:flex;align-items:center;justify-content:center;gap:3px;font-weight:950;font-size:13px}
+.wall-tool{
+  height:36px;border-radius:9px;background:#18243a;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none;
+}
+.wall-tool.active{box-shadow:0 0 0 2px #39e0a188}
+.wall-icon{
+  display:block;background:linear-gradient(180deg,#6981aa,#314468);border:1px solid #94abd4;border-radius:2px;
+}
+.wall-tool[data-orient="h"] .wall-icon{width:22px;height:6px}
+.wall-tool[data-orient="v"] .wall-icon{width:6px;height:22px}
+
+.settings{
+  width:100%;height:34px;border-radius:11px;background:#18243a;color:#fff;border:1px solid #2a3b55;font-weight:950;font-size:12px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer;
+}
+
+.modal{position:fixed;inset:0;z-index:100;background:#050a14dd;backdrop-filter:blur(12px);display:none;padding:16px}
+.modal.open{display:flex}.modal-card{width:min(100%,420px);margin:auto;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px;display:flex;flex-direction:column;box-shadow:0 20px 60px #0009}
+.modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.modal-head h2{margin:0;font-size:18px}.close{width:34px;height:34px;border-radius:9px;background:var(--panel2);font-size:20px;cursor:pointer}
+.setting{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}.setting small{display:block;color:var(--muted);margin-top:2px;font-size:10.5px}
+.switch{width:46px;height:26px;border-radius:16px;background:#41516c;padding:2.5px;cursor:pointer}.switch i{display:block;width:21px;height:21px;background:#fff;border-radius:50%;transition:.18s}.switch.on{background:var(--mint)}.switch.on i{transform:translateX(20px)}
+.theme{display:flex;gap:5px}.theme button{padding:6px 10px;border-radius:8px;background:var(--panel2);font-size:11px;cursor:pointer}.theme button.active{outline:2px solid var(--blue)}
+
+.author-box{margin-top:14px;text-align:center;font-size:12.5px;font-weight:800;color:#9eb1d1}
+.author-box a{color:#52a5ff;text-decoration:none}
+
+.dialog-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}
+.dialog-btn{height:38px;border-radius:10px;font-weight:900;font-size:12.5px;cursor:pointer}
+.dialog-btn.primary{background:linear-gradient(135deg,#3c86ff,#285bc6);color:#fff}
+.dialog-btn.danger{background:#c93b4b;color:#fff}
+.dialog-btn.secondary{background:var(--panel2);color:var(--text)}
+
+.light{--board:#eef1f7;--boardLine:#b8c0d0;--bg:#edf1f8;--panel:#fff;--panel2:#edf1f7;--text:#1c2940;--muted:#78869e;--line:#d5ddea}
+.light .cell{border-right-color:#c4cddc;border-bottom-color:#c4cddc}
+.light .resign-btn,.light .undo,.light .ctrl-btn,.light .skip-btn{background:#fff;border-color:#d5ddea;color:#1c2940}
+.light .dock{background:#fff;border-color:#d5ddea;color:#1c2940}
+.light .wall-tool{background:#edf2f9;color:#1c2940}
+
+#engineSearchPill{position:fixed;z-index:99990;top:calc(env(safe-area-inset-top) + 7px);left:50%;transform:translate(-50%,-14px) scale(.96);opacity:0;pointer-events:none;display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:999px;background:rgba(12,22,38,.94);border:1px solid #31506e;box-shadow:0 7px 22px #0007;backdrop-filter:blur(12px);font-size:11px;font-weight:950;transition:all .16s ease}
+#engineSearchPill.show{opacity:1;transform:translate(-50%,0) scale(1)}
+#engineSearchPill .dot{width:7px;height:7px;border-radius:50%;background:#39e0a1;box-shadow:0 0 9px #39e0a1;animation:engineDot .7s ease-in-out infinite alternate}
+#engineSearchPill .sub{color:#8fa3bd;font-weight:800;font-size:9px}
+@keyframes engineDot{to{transform:scale(.65);opacity:.55}}
+</style>
+</head>
+<body>
+<div id="engineSearchPill"><span class="dot"></span><span>ИЩЕМ ХОД</span><span class="sub" id="engineSearchSub">Nemesis + Stockfish Core</span></div>
+
+<div id="appBlocker">
+  <div class="blocker-card">
+    <div style="font-size:48px;margin-bottom:8px;">🔒</div>
+    <h2 style="font-size:19px;font-weight:950;margin-bottom:6px;">Доступ ограничен</h2>
+    <p style="color:#8b9ab3;font-size:12.5px;line-height:1.45;margin-bottom:14px;">
+      Откройте чит через бота или вставьте ключ доступа (он привяжется к этому устройству навсегда):
+    </p>
+    <div class="token-box">
+      <input type="text" id="manualTokenInput" class="token-input" placeholder="Вставьте ключ из бота...">
+      <button id="manualTokenBtn" class="token-btn">Войти</button>
+    </div>
+    <div id="tokenError" style="color:#ff6b79;font-size:11px;margin-top:6px;display:none;font-weight:700;">Неверный или истекший ключ</div>
+    <p style="color:#8b9ab3;font-size:12px;margin-top:16px;">
+      Канал проекта: <a href="https://t.me/WallRushHack" target="_blank" style="color:#347fff;text-decoration:none;font-weight:900;">@WallRushHack</a>
+    </p>
+  </div>
+</div>
+
+<div class="app">
+  <header class="top">
+    <div class="brand">
+      <div class="brand-mark"><i></i><i></i><i></i><i></i></div>
+      <div class="brand-name">WALLHACK PRO</div>
+    </div>
+    <div class="top-actions">
+      <button class="skip-btn" id="skipTurnBtn" title="Пропустить ход">⏭ Пропуск</button>
+      <button class="resign-btn" id="resign" title="Сбросить партию">↻ Сброс</button>
+    </div>
+  </header>
+
+  <div class="control-bar">
+    <button class="ctrl-btn" id="modeToggle" title="Сменить режим (Дуэль -> Гонка -> 4 игрока)">
+      <span id="modeLabel">Дуэль 9×9</span>
+    </button>
+    <button class="ctrl-btn" id="firstTurnToggle" title="Кто делает 1-й ход">
+      <span>1-й:</span>
+      <span class="turn-badge green" id="firstTurnBadge">Ты</span>
+    </button>
+    <button class="ctrl-btn" id="colorToggle" title="Твой цвет фишки (ты всегда снизу)">
+      <span>Ты:</span>
+      <span class="turn-badge blue" id="colorBadge">Синий</span>
+    </button>
+    <button class="ctrl-btn" id="racePosToggle" style="display:none">
+      <span>Старт:</span>
+      <span id="racePosBadge">Справа</span>
+    </button>
+    <button class="ctrl-btn" id="wallsToggle" style="display:none">
+      <span>Стен:</span>
+      <span id="wallsBadge">15</span>
+    </button>
+  </div>
+
+  <div class="finish-bar-wrap" id="finishBarWrap">
+    <div class="finish-bar">
+      <div class="finish-line"></div>
+      <div class="finish-label">🏁 ФИНИШ</div>
+      <div class="finish-line"></div>
+    </div>
+  </div>
+
+  <div class="players-wrap">
+    <div class="players" id="playersContainer"></div>
+  </div>
+
+  <main class="board-frame" id="boardFrame">
+    <div class="board-shell mode-duel" id="boardShell">
+      <div class="edge-glow edge-bottom" id="edgeBottom"></div>
+      <div class="edge-glow edge-left" id="edgeLeft"></div>
+      <div class="edge-glow edge-top" id="edgeTop"></div>
+      <div class="edge-glow edge-right" id="edgeRight"></div>
+      <div class="board-grid" id="boardGrid"></div>
+      <div class="piece-layer" id="pieceLayer"></div>
+      <div class="wall-layer" id="wallLayer"></div>
+    </div>
+  </main>
+
+  <div class="bottom-container">
+    <div class="bottom-row">
+      <button class="apply" id="apply" disabled>✓ Применить совет</button>
+      <button class="undo" id="undo">↩ Назад</button>
+    </div>
+    
+    <section class="dock">
+      <div class="dock-count"><span>🧱</span><span id="dockCount">10</span></div>
+      <button class="wall-tool" data-orient="h" id="wallH"><i class="wall-icon"></i></button>
+      <button class="wall-tool" data-orient="v" id="wallV"><i class="wall-icon"></i></button>
+    </section>
+    
+    <button class="settings" id="settings"><span>⚙</span> Настройки</button>
+  </div>
+</div>
+
+<!-- Модалка настроек -->
+<div class="modal" id="modal">
+  <div class="modal-card">
+    <div class="modal-head"><h2>Настройки</h2><button class="close" id="close">×</button></div>
+    <div class="setting">
+      <div><b>Тема</b><small>Оформление интерфейса</small></div>
+      <div class="theme"><button id="darkBtn">Тёмная</button><button id="lightBtn">Светлая</button></div>
+    </div>
+    <div class="setting">
+      <div><b>Звуковые эффекты</b><small>Отклик при ходе и стене</small></div>
+      <button class="switch on" id="soundSwitch"><i></i></button>
+    </div>
+    <div class="author-box">канал: <a href="https://t.me/WallRushHack" target="_blank">@WallRushHack</a></div>
+  </div>
+</div>
+
+<!-- Кастомная модалка сброса и окончания партии -->
+<div class="modal" id="dialogModal">
+  <div class="modal-card" style="text-align:center;">
+    <h2 id="dialogTitle" style="font-size:18px;font-weight:950;margin-bottom:8px;">Сбросить партию?</h2>
+    <p id="dialogText" style="color:var(--muted);font-size:13px;line-height:1.45;">Текущее расположение фишек и стен будет очищено.</p>
+    <div class="dialog-actions" id="dialogActions">
+      <button class="dialog-btn secondary" id="dialogCancel">Отмена</button>
+      <button class="dialog-btn danger" id="dialogConfirm">Сбросить</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+<script>
+"use strict";
+
+const tg = window.Telegram?.WebApp;
+if(tg){
+  tg.ready(); tg.expand();
+  try{tg.setHeaderColor("#0b111e");tg.setBackgroundColor("#0b111e");tg.enableClosingConfirmation();}catch(e){}
+}
+
+// ============================================================
+// 5-УРОВНЕВАЯ ВЕЧНАЯ ПРИВЯЗКА ПОДПИСКИ К УСТРОЙСТВУ
+// ============================================================
+const SECRET = "wallrush_ultra_secret_key_2026";
+const CACHE_NAME = "wallhack_perm_auth_v1";
+
+function idbOpen() {
+  return new Promise((res) => {
+    try {
+      const req = indexedDB.open("wallhack_vault_v4", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("auth");
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => res(null);
+    } catch(e) { res(null); }
+  });
+}
+async function idbGet(k) {
+  const db = await idbOpen();
+  if(!db) return null;
+  return new Promise((res) => {
+    try {
+      const tx = db.transaction("auth", "readonly");
+      const r = tx.objectStore("auth").get(k);
+      r.onsuccess = () => res(r.result || null);
+      r.onerror = () => res(null);
+    } catch(e) { res(null); }
+  });
+}
+async function idbSet(k, v) {
+  const db = await idbOpen();
+  if(!db) return;
+  try {
+    const tx = db.transaction("auth", "readwrite");
+    tx.objectStore("auth").put(v, k);
+  } catch(e) {}
+}
+
+async function cacheSetToken(tokenStr) {
+  try {
+    if ("caches" in window) {
+      const c = await caches.open(CACHE_NAME);
+      await c.put("/__sub_token__", new Response(tokenStr));
+    }
+  } catch(e){}
+}
+async function cacheGetToken() {
+  try {
+    if ("caches" in window) {
+      const c = await caches.open(CACHE_NAME);
+      const resp = await c.match("/__sub_token__");
+      if (resp) return await resp.text();
+    }
+  } catch(e){}
+  return null;
+}
+
+async function checkSign(testUid, testExp, testSign) {
+  if (!testUid || !testExp || !testSign) return false;
+  if (testExp <= Math.floor(Date.now() / 1000)) return false;
+  try {
+    const encoder = new TextEncoder();
+    const key = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(SECRET),
+      { name: "HMAC", hash: "SHA-256" },
+      false,
+      ["sign"]
+    );
+    const signatureBuffer = await crypto.subtle.sign(
+      "HMAC",
+      key,
+      encoder.encode(`${testUid}:${testExp}`)
+    );
+    const computedSign = Array.from(new Uint8Array(signatureBuffer))
+      .map(b => b.toString(16).padStart(2, "0"))
+      .join("");
+    return computedSign === testSign.toLowerCase();
+  } catch (e) {
+    return false;
+  }
+}
+
+async function savePermanentToken(tokenStr) {
+  try { localStorage.setItem("sub_token", tokenStr); } catch(e){}
+  await idbSet("sub_token", tokenStr);
+  await cacheSetToken(tokenStr);
+  try { document.cookie = `sub_token=${encodeURIComponent(tokenStr)}; max-age=315360000; path=/; SameSite=Lax`; } catch(e){}
+  try { tg?.CloudStorage?.setItem("sub_token", tokenStr); } catch(e){}
+}
+
+function unlockApp() {
+  const blocker = document.getElementById("appBlocker");
+  if (blocker) blocker.style.display = "none";
+}
+
+async function tryTokenString(rawStr) {
+  if (!rawStr) return false;
+  let clean = rawStr.trim();
+  if (clean.includes("#")) clean = clean.split("#")[1];
+  if (clean.includes("uid=")) {
+    const p = new URLSearchParams(clean);
+    const u = p.get("uid"), e = parseInt(p.get("exp"), 10), s = p.get("sign");
+    if (await checkSign(u, e, s)) {
+      await savePermanentToken(`${u}:${e}:${s}`);
+      unlockApp();
+      return true;
+    }
+    return false;
+  }
+  const parts = clean.split(":");
+  if (parts.length === 3) {
+    const [u, eStr, s] = parts;
+    const e = parseInt(eStr, 10);
+    if (await checkSign(u, e, s)) {
+      await savePermanentToken(`${u}:${e}:${s}`);
+      unlockApp();
+      return true;
+    }
+  }
+  return false;
+}
+
+async function verifyAccessSystem() {
+  if (window.location.hash.length > 1 && await tryTokenString(window.location.hash.substring(1))) return;
+  if (window.location.search.length > 1 && await tryTokenString(window.location.search.substring(1))) return;
+
+  try {
+    const localVal = localStorage.getItem("sub_token");
+    if (localVal && await tryTokenString(localVal)) return;
+  } catch(e){}
+
+  const idbToken = await idbGet("sub_token");
+  if (idbToken && await tryTokenString(idbToken)) return;
+
+  const cacheToken = await cacheGetToken();
+  if (cacheToken && await tryTokenString(cacheToken)) return;
+
+  try {
+    const match = document.cookie.match(/(?:^|;\s*)sub_token=([^;]*)/);
+    if (match && await tryTokenString(decodeURIComponent(match[1]))) return;
+  } catch(e){}
+
+  if (tg?.CloudStorage) {
+    tg.CloudStorage.getItem("sub_token", async (err, val) => {
+      if (!err && val && await tryTokenString(val)) return;
+      document.getElementById("appBlocker").style.display = "flex";
+    });
+  } else {
+    document.getElementById("appBlocker").style.display = "flex";
+  }
+}
+
+document.getElementById("manualTokenBtn").onclick = async () => {
+  const val = document.getElementById("manualTokenInput").value;
+  const ok = await tryTokenString(val);
+  if (ok) {
+    unlockApp();
+  } else {
+    document.getElementById("tokenError").style.display = "block";
+  }
+};
+
+verifyAccessSystem();
+
+// ============================================================
+// КАСТОМНЫЕ МОДАЛКИ
+// ============================================================
+const dialogModal = document.getElementById("dialogModal");
+const dialogTitle = document.getElementById("dialogTitle");
+const dialogText = document.getElementById("dialogText");
+const dialogCancel = document.getElementById("dialogCancel");
+const dialogConfirm = document.getElementById("dialogConfirm");
+
+function showConfirmDialog(title, text, confirmLabel, onConfirm) {
+  dialogTitle.textContent = title;
+  dialogText.textContent = text;
+  dialogCancel.style.display = "block";
+  dialogConfirm.textContent = confirmLabel;
+  dialogConfirm.className = "dialog-btn danger";
+  dialogModal.classList.add("open");
+  dialogCancel.onclick = () => dialogModal.classList.remove("open");
+  dialogConfirm.onclick = () => {
+    dialogModal.classList.remove("open");
+    onConfirm();
+  };
+}
+
+function showNoticeDialog(title, text) {
+  dialogTitle.textContent = title;
+  dialogText.textContent = text;
+  dialogCancel.style.display = "none";
+  dialogConfirm.textContent = "Новая партия";
+  dialogConfirm.className = "dialog-btn primary";
+  dialogModal.classList.add("open");
+  dialogConfirm.onclick = () => {
+    dialogModal.classList.remove("open");
+    state = initialState();
+    history = [];
+    engineMove = null;
+    selectedWall = null;
+    render(false);
+    computeEngine();
+  };
+}
+
+// ============================================================
+// ИГРОВАЯ ЛОГИКА И 3 РЕЖИМА (DUEL 9x9, RACE 9x13, QUAD 11x11)
+// ============================================================
+const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
+const QUAD_ORDER = ["me", "left", "top", "right"];
+const QUAD_COLOR_CYCLE = ["green", "blue", "red", "yellow"];
+const COLOR_NAMES = { blue: "Синий", red: "Красный", green: "Зелёный", yellow: "Жёлтый" };
+const SEAT_NAMES = { me: "Ты", left: "Слева", top: "Сверху", right: "Справа", opp: "Противник" };
+
+let state, history = [], engineMove = null, selectedWall = null, soundOn = true, theme = "dark";
+let gameMode = "duel"; // "duel" | "race" | "quad"
+let firstTurnSetting = "me";
+let myColorSetting = "blue";
+let quadMyColorSetting = "green";
+let raceSideSetting = "right";
+let raceWallsSetting = 15;
+let audio = null, dragging = false, dragOrient = null, ghostEl = null;
+let activeEngineCoreName = "Nemesis+SF";
+
+const qArr = new Int16Array(256);
+const distArr = new Int8Array(256);
+
+function getBoardRows(){ return gameMode === "race" ? 13 : (gameMode === "quad" ? 11 : 9); }
+function getBoardCols(){ return gameMode === "quad" ? 11 : 9; }
+function getActiveOrder(){ return gameMode === "quad" ? QUAD_ORDER : ["me", "opp"]; }
+
+function getPlayerColors(){
+  if(gameMode === "quad"){
+    const idx = Math.max(0, QUAD_COLOR_CYCLE.indexOf(quadMyColorSetting));
+    return {
+      me: QUAD_COLOR_CYCLE[idx % 4],
+      left: QUAD_COLOR_CYCLE[(idx + 1) % 4],
+      top: QUAD_COLOR_CYCLE[(idx + 2) % 4],
+      right: QUAD_COLOR_CYCLE[(idx + 3) % 4]
+    };
+  }
+  return {
+    me: myColorSetting,
+    opp: myColorSetting === "blue" ? "red" : "blue"
+  };
+}
+
+function initialState(){
+  const rows = getBoardRows();
+  if(gameMode === "quad"){
+    const ft = QUAD_ORDER.includes(firstTurnSetting) ? firstTurnSetting : "me";
+    return {
+      turn: ft,
+      gameOver: false,
+      players: {
+        me:    { r: 10, c: 5, walls: 7, active: true },
+        left:  { r: 5,  c: 0, walls: 7, active: true },
+        top:   { r: 0,  c: 5, walls: 7, active: true },
+        right: { r: 5,  c: 10, walls: 7, active: true }
+      },
+      walls: new Map()
+    };
+  }
+  const initWalls = gameMode === "duel" ? 10 : raceWallsSetting;
+  const ft = (firstTurnSetting === "me" || firstTurnSetting === "opp") ? firstTurnSetting : "me";
+  let mePos, oppPos;
+  if(gameMode === "race"){
+    const myCol = raceSideSetting === "right" ? 6 : 2;
+    const oppCol = raceSideSetting === "right" ? 2 : 6;
+    mePos = { r: rows - 1, c: myCol, walls: initWalls, active: true };
+    oppPos = { r: rows - 1, c: oppCol, walls: initWalls, active: true };
+  } else {
+    mePos = { r: 8, c: 4, walls: initWalls, active: true };
+    oppPos = { r: 0, c: 4, walls: initWalls, active: true };
+  }
+  return {
+    turn: ft,
+    gameOver: false,
+    players: { me: mePos, opp: oppPos },
+    walls: new Map()
+  };
+}
+
+function wallKey(r,c,o){ return r+","+c+","+o; }
+
+function cloneState(){
+  const pCopy = {};
+  for(const k of Object.keys(state.players)) pCopy[k] = {...state.players[k]};
+  return {
+    turn: state.turn,
+    gameOver: state.gameOver,
+    players: pCopy,
+    walls: new Map(state.walls)
+  };
+}
+
+function save(){
+  history.push(cloneState());
+  if(history.length > 100) history.shift();
+}
+
+function restore(s){
+  const pCopy = {};
+  for(const k of Object.keys(s.players)) pCopy[k] = {...s.players[k]};
+  state = {
+    turn: s.turn,
+    gameOver: s.gameOver,
+    players: pCopy,
+    walls: new Map(s.walls)
+  };
+  engineMove = null; selectedWall = null;
+  render(true); computeEngine();
+}
+
+function inBoard(r,c){
+  return r >= 0 && r < getBoardRows() && c >= 0 && c < getBoardCols();
+}
+
+function edgeBlocked(a,b,walls=state.walls){
+  const dr = b.r - a.r, dc = b.c - a.c;
+  if(dr === 0 && Math.abs(dc) === 1){
+    const c = Math.min(a.c, b.c);
+    return walls.has(wallKey(a.r, c, "v")) || walls.has(wallKey(a.r - 1, c, "v"));
+  }
+  if(dc === 0 && Math.abs(dr) === 1){
+    const r = Math.min(a.r, b.r);
+    return walls.has(wallKey(r, a.c, "h")) || walls.has(wallKey(r, a.c - 1, "h"));
+  }
+  return true;
+}
+
+function isOccupiedByOther(r, c, moverKey){
+  for(const [k, p] of Object.entries(state.players)){
+    if(k !== moverKey && p.active && p.r === r && p.c === c) return true;
+  }
+  return false;
+}
+
+function legalMoves(playerKey, walls=state.walls){
+  const me = state.players[playerKey];
+  if(!me || !me.active) return [];
+  const out = [];
+  for(const [dr, dc] of dirs){
+    const nr = me.r + dr, nc = me.c + dc;
+    if(!inBoard(nr, nc) || edgeBlocked(me, {r:nr, c:nc}, walls)) continue;
+
+    if(isOccupiedByOther(nr, nc, playerKey)){
+      const jr = nr + dr, jc = nc + dc;
+      if(inBoard(jr, jc) && !edgeBlocked({r:nr, c:nc}, {r:jr, c:jc}, walls) && !isOccupiedByOther(jr, jc, playerKey)){
+        out.push({r:jr, c:jc});
+      } else {
+        const sides = [
+          {r: nr + dc, c: nc - dr},
+          {r: nr - dc, c: nc + dr}
+        ];
+        for(const x of sides){
+          if(inBoard(x.r, x.c) && !edgeBlocked({r:nr, c:nc}, x, walls) && !isOccupiedByOther(x.r, x.c, playerKey)){
+            out.push(x);
+          }
+        }
+      }
+    } else {
+      out.push({r:nr, c:nc});
+    }
+  }
+  return out;
+}
+
+function isPlayerAtGoal(playerKey, r, c){
+  if(gameMode === "quad") return r === 5 && c === 5;
+  if(gameMode === "race") return r === 0;
+  return playerKey === "me" ? r === 0 : r === 8;
+}
+
+function shortestPath(playerKey, walls=state.walls){
+  const s = state.players[playerKey];
+  if(!s || !s.active) return 0;
+  if(isPlayerAtGoal(playerKey, s.r, s.c)) return 0;
+
+  const rows = getBoardRows(), cols = getBoardCols(), total = rows * cols;
+  distArr.fill(-1, 0, total);
+  let head = 0, tail = 0;
+  const startIdx = s.r * cols + s.c;
+  distArr[startIdx] = 0;
+  qArr[tail++] = startIdx;
+
+  while(head < tail){
+    const idx = qArr[head++];
+    const r = (idx / cols) | 0, c = idx % cols, d = distArr[idx];
+    if(isPlayerAtGoal(playerKey, r, c)) return d;
+
+    for(const [dr, dc] of dirs){
+      const nr = r + dr, nc = c + dc;
+      if(nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+      const ni = nr * cols + nc;
+      if(distArr[ni] !== -1) continue;
+      if(!edgeBlocked({r, c}, {r:nr, c:nc}, walls)){
+        distArr[ni] = d + 1;
+        qArr[tail++] = ni;
+      }
+    }
+  }
+  return Infinity;
+}
+
+function legalWall(r, c, o, walls=state.walls){
+  const maxR = getBoardRows() - 2;
+  const maxC = getBoardCols() - 2;
+  if((o !== "h" && o !== "v") || r < 0 || r > maxR || c < 0 || c > maxC) return false;
+  const k = wallKey(r, c, o);
+  if(walls.has(k)) return false;
+
+  if(o === "h"){
+    if(walls.has(wallKey(r, c, "v"))) return false;
+    if(walls.has(wallKey(r, c - 1, "h")) || walls.has(wallKey(r, c + 1, "h"))) return false;
+  } else {
+    if(walls.has(wallKey(r, c, "h"))) return false;
+    if(walls.has(wallKey(r - 1, c, "v")) || walls.has(wallKey(r + 1, c, "v"))) return false;
+  }
+
+  const copy = new Map(walls);
+  copy.set(k, "temp");
+  for(const pk of getActiveOrder()){
+    if(state.players[pk]?.active && shortestPath(pk, copy) === Infinity) return false;
+  }
+  return true;
+}
+
+function updateBoardLayout(){
+  const frame = document.getElementById("boardFrame");
+  const shell = document.getElementById("boardShell");
+  if(!frame || !shell) return;
+  const frameW = frame.clientWidth, frameH = frame.clientHeight;
+  if(frameW <= 0 || frameH <= 0) return;
+
+  if(gameMode === "duel" || gameMode === "quad"){
+    const size = Math.min(frameW, frameH);
+    shell.style.width = size + "px";
+    shell.style.height = size + "px";
+  } else {
+    let w = frameH * (9 / 13), h = frameH;
+    if(w > frameW){ w = frameW; h = frameW * (13 / 9); }
+    shell.style.width = w + "px";
+    shell.style.height = h + "px";
+  }
+}
+
+function wallPosition(r, c, o){
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows(), cols = getBoardCols();
+  return { x: rect.width * (c + 1) / cols, y: rect.height * (r + 1) / rows };
+}
+
+function cellCenterPosition(r, c){
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows(), cols = getBoardCols();
+  return { x: rect.width * (c + 0.5) / cols, y: rect.height * (r + 0.5) / rows };
+}
+
+function createWallPiece(r, c, o, colorClass="", extra=""){
+  const el = document.createElement("div");
+  el.className = `wall-piece ${o} ${colorClass ? "color-" + colorClass : ""} ${extra}`.trim();
+  const p = wallPosition(r, c, o);
+  el.style.left = p.x + "px";
+  el.style.top = p.y + "px";
+
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows(), cols = getBoardCols();
+  if(o === "h"){
+    el.style.width = (rect.width * (2 / cols) - 3) + "px";
+  } else {
+    el.style.height = (rect.height * (2 / rows) - 3) + "px";
+  }
+  return el;
+}
+
+let currentGridSig = "";
+function buildGridDOM(){
+  const grid = document.getElementById("boardGrid");
+  const rows = getBoardRows(), cols = getBoardCols();
+  const sig = `${gameMode}:${rows}x${cols}`;
+  if(currentGridSig === sig) return;
+
+  currentGridSig = sig;
+  grid.innerHTML = "";
+  grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+  for(let r = 0; r < rows; r++){
+    for(let c = 0; c < cols; c++){
+      const cell = document.createElement("div");
+      cell.className = "cell" + (gameMode === "quad" && r === 5 && c === 5 ? " quad-goal" : "");
+      if(c === cols - 1) cell.style.borderRight = "0";
+      if(r === rows - 1) cell.style.borderBottom = "0";
+      cell.dataset.r = r;
+      cell.dataset.c = c;
+      cell.addEventListener("click", () => onCell(r, c));
+      grid.appendChild(cell);
+    }
+  }
+}
+
+function renderPieces(animate=true){
+  const layer = document.getElementById("pieceLayer");
+  const order = getActiveOrder();
+  const colors = getPlayerColors();
+  const shell = document.getElementById("boardShell"), rect = shell.getBoundingClientRect();
+  const rows = getBoardRows(), cols = getBoardCols();
+  const pieceSize = Math.min(rect.width / cols, rect.height / rows) * 0.60;
+
+  if(layer.children.length !== order.length){
+    layer.innerHTML = "";
+    for(const pk of order){
+      const el = document.createElement("div");
+      el.id = "piece_" + pk;
+      layer.appendChild(el);
+    }
+  }
+
+  for(const pk of order){
+    const p = state.players[pk];
+    const el = document.getElementById("piece_" + pk);
+    if(!el) continue;
+    if(!p.active){
+      el.style.display = "none";
+      continue;
+    }
+    el.style.display = "block";
+    const pos = cellCenterPosition(p.r, p.c);
+    el.className = `board-piece ${colors[pk]}${state.turn === pk ? " active-turn" : ""}`;
+    if(!animate) el.style.transition = "none";
+    el.style.width = pieceSize + "px";
+    el.style.height = pieceSize + "px";
+    el.style.left = pos.x + "px";
+    el.style.top = pos.y + "px";
+    if(!animate) requestAnimationFrame(() => { el.style.transition = ""; });
+  }
+}
+
+function renderPlayersBar(){
+  const container = document.getElementById("playersContainer");
+  const order = getActiveOrder();
+  const colors = getPlayerColors();
+  container.className = "players" + (gameMode === "quad" ? " quad-grid" : "");
+  container.innerHTML = "";
+
+  for(const pk of order){
+    const p = state.players[pk];
+    const col = colors[pk];
+    const card = document.createElement("div");
+    card.className = `player is-${col}${state.turn === pk ? " active" : ""}${!p.active ? " eliminated" : ""}`;
+    const label = pk === "me" ? `Ты (${COLOR_NAMES[col]})` : `${SEAT_NAMES[pk]}`;
+    card.innerHTML = `
+      <div class="ball ${col}"></div>
+      <div class="ptext">
+        <div class="pname">${label}</div>
+        <div class="pmeta">${p.active ? `<span class="wallcount">${p.walls}</span> 🧱` : "ВЫБЫЛ"}</div>
+      </div>
+    `;
+    if(gameMode === "quad" && pk !== "me"){
+      card.title = "Нажми, если игрок выбыл или сдался";
+      card.onclick = () => toggleOpponentActive(pk);
+    }
+    container.appendChild(card);
+  }
+}
+
+function updateEdgeGlows(){
+  const colors = getPlayerColors();
+  const eb = document.getElementById("edgeBottom");
+  const el = document.getElementById("edgeLeft");
+  const et = document.getElementById("edgeTop");
+  const er = document.getElementById("edgeRight");
+
+  if(gameMode === "quad"){
+    eb.className = `edge-glow edge-bottom ${colors.me} on`;
+    el.className = `edge-glow edge-left ${colors.left} on`;
+    et.className = `edge-glow edge-top ${colors.top} on`;
+    er.className = `edge-glow edge-right ${colors.right} on`;
+  } else {
+    eb.className = `edge-glow edge-bottom ${colors.me} ${state.turn === "me" ? "on" : ""}`;
+    et.className = `edge-glow edge-top ${colors.opp} ${state.turn === "opp" ? "on" : ""}`;
+    el.className = "edge-glow edge-left";
+    er.className = "edge-glow edge-right";
+  }
+}
+
+function render(animatePieces=true){
+  updateBoardLayout();
+  buildGridDOM();
+
+  const grid = document.getElementById("boardGrid");
+  const layer = document.getElementById("wallLayer");
+  layer.innerHTML = "";
+
+  const legal = state.gameOver ? [] : legalMoves(state.turn);
+  const isMyTurn = (state.turn === "me");
+
+  const cells = grid.children;
+  for(let i = 0; i < cells.length; i++){
+    const cell = cells[i];
+    const r = +cell.dataset.r, c = +cell.dataset.c;
+    const isLegal = legal.some(p => p.r === r && p.c === c);
+    const isEngine = (isMyTurn && engineMove?.type === "step" && engineMove.r === r && engineMove.c === c);
+    cell.classList.toggle("legal", isLegal);
+    cell.classList.toggle("engine", isEngine);
+  }
+
+  renderPieces(animatePieces);
+
+  for(const [k, wallColor] of state.walls.entries()){
+    const [r, c, o] = k.split(",");
+    layer.appendChild(createWallPiece(+r, +c, o, wallColor));
+  }
+  if(isMyTurn && engineMove?.type === "wall"){
+    layer.appendChild(createWallPiece(engineMove.r, engineMove.c, engineMove.o, "", "engine"));
+  }
+
+  renderPlayersBar();
+  updateEdgeGlows();
+  updateUI();
+}
+
+function updateUI(){
+  const curP = state.players[state.turn];
+  document.getElementById("dockCount").textContent = curP ? curP.walls : 0;
+
+  const colors = getPlayerColors();
+  const firstTurnBadge = document.getElementById("firstTurnBadge");
+  if(firstTurnBadge){
+    const ftKey = state.players[firstTurnSetting] ? firstTurnSetting : "me";
+    firstTurnBadge.textContent = SEAT_NAMES[ftKey];
+    firstTurnBadge.className = "turn-badge " + (colors[ftKey] || "blue");
+  }
+
+  const colorBadge = document.getElementById("colorBadge");
+  if(colorBadge){
+    const myCol = colors.me;
+    colorBadge.textContent = COLOR_NAMES[myCol];
+    colorBadge.className = "turn-badge " + myCol;
+  }
+
+  document.getElementById("racePosToggle").style.display = (gameMode === "race" ? "flex" : "none");
+  document.getElementById("racePosBadge").textContent = (raceSideSetting === "right" ? "Справа" : "Слева");
+
+  document.getElementById("wallsToggle").style.display = (gameMode === "race" ? "flex" : "none");
+  document.getElementById("wallsBadge").textContent = raceWallsSetting;
+
+  document.getElementById("skipTurnBtn").style.display = (gameMode === "quad" ? "flex" : "none");
+
+  const modeLabel = document.getElementById("modeLabel");
+  if(modeLabel){
+    modeLabel.textContent = gameMode === "quad" ? "4 игрока 11×11" : (gameMode === "race" ? "Гонка 9×13" : "Дуэль 9×9");
+  }
+
+  document.getElementById("finishBarWrap").classList.toggle("visible", gameMode === "race");
+
+  const isMyTurn = (state.turn === "me");
+  document.getElementById("apply").disabled = !(isMyTurn && engineMove && !state.gameOver);
+  document.querySelectorAll(".wall-tool").forEach(b => b.classList.toggle("active", b.dataset.orient === selectedWall));
+}
+
+function nextActiveTurn(currentKey){
+  const order = getActiveOrder();
+  let idx = order.indexOf(currentKey);
+  for(let i = 1; i <= order.length; i++){
+    const cand = order[(idx + i) % order.length];
+    if(state.players[cand]?.active) return cand;
+  }
+  return "me";
+}
+
+function toggleOpponentActive(pk){
+  if(gameMode !== "quad" || pk === "me") return;
+  save();
+  state.players[pk].active = !state.players[pk].active;
+  if(!state.players[pk].active && state.turn === pk){
+    state.turn = nextActiveTurn(pk);
+  }
+  render(true);
+  computeEngine();
+}
+
+function onCell(r, c){
+  if(state.gameOver) return;
+  if(legalMoves(state.turn).some(p => p.r === r && p.c === c)){
+    save();
+    state.players[state.turn].r = r;
+    state.players[state.turn].c = c;
+    playMoveSound();
+    finishTurn();
+  }
+}
+
+function placeWall(r, c, o){
+  const curP = state.players[state.turn];
+  if(state.gameOver || !curP || curP.walls <= 0 || !legalWall(r, c, o)) return false;
+  save();
+  const colors = getPlayerColors();
+  state.walls.set(wallKey(r, c, o), colors[state.turn]);
+  curP.walls--;
+  playWallSound();
+  selectedWall = null;
+  engineMove = null;
+  finishTurn();
+  return true;
+}
+
+function finishTurn(){
+  const curKey = state.turn;
+  const curP = state.players[curKey];
+  if(isPlayerAtGoal(curKey, curP.r, curP.c)){
+    state.gameOver = true;
+    hideSearchPill();
+    render(true);
+    showNoticeDialog(
+      curKey === "me" ? "🏆 Победа!" : "Партия завершена",
+      curKey === "me" ? "Ты первым достиг финиша!" : `Победил игрок: ${SEAT_NAMES[curKey]}`
+    );
+    return;
+  }
+  state.turn = nextActiveTurn(curKey);
+  computeEngine();
+}
+
+function applyEngine(){
+  if(!engineMove || state.gameOver || state.turn !== "me") return;
+  save();
+  if(engineMove.type === "step"){
+    state.players.me.r = engineMove.r;
+    state.players.me.c = engineMove.c;
+    playMoveSound();
+  } else {
+    const colors = getPlayerColors();
+    state.walls.set(wallKey(engineMove.r, engineMove.c, engineMove.o), colors.me);
+    state.players.me.walls--;
+    playWallSound();
+  }
+  engineMove = null;
+  finishTurn();
+}
+
+document.getElementById("apply").onclick = applyEngine;
+document.getElementById("undo").onclick = () => { if(history.length) restore(history.pop()); };
+document.getElementById("skipTurnBtn").onclick = () => {
+  if(state.gameOver) return;
+  save();
+  state.turn = nextActiveTurn(state.turn);
+  engineMove = null;
+  render(true);
+  computeEngine();
+};
+
+document.getElementById("resign").onclick = () => {
+  showConfirmDialog(
+    "Сбросить партию?",
+    "Все ходы и стены будут очищены, игра начнется с начальной позиции.",
+    "Сбросить",
+    () => {
+      state = initialState();
+      history = [];
+      engineMove = null;
+      selectedWall = null;
+      render(false);
+      computeEngine();
+    }
+  );
+};
+
+document.getElementById("modeToggle").onclick = () => {
+  const modes = ["duel", "race", "quad"];
+  gameMode = modes[(modes.indexOf(gameMode) + 1) % modes.length];
+  try{ localStorage.setItem("wr-gamemode", gameMode); }catch(e){}
+
+  firstTurnSetting = "me";
+  const shell = document.getElementById("boardShell");
+  shell.className = "board-shell mode-" + gameMode;
+
+  currentGridSig = "";
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+
+  render(false);
+  computeEngine();
+};
+
+document.getElementById("firstTurnToggle").onclick = () => {
+  const order = getActiveOrder();
+  const idx = order.indexOf(firstTurnSetting);
+  firstTurnSetting = order[(idx + 1) % order.length];
+  state = initialState();
+  history = [];
+  engineMove = null;
+  selectedWall = null;
+  render(false);
+  computeEngine();
+};
+
+document.getElementById("colorToggle").onclick = () => {
+  if(gameMode === "quad"){
+    const idx = QUAD_COLOR_CYCLE.indexOf(quadMyColorSetting);
+    quadMyColorSetting = QUAD_COLOR_CYCLE[(idx + 1) % 4];
+    try{ localStorage.setItem("wr-quadcolor", quadMyColorSetting); }catch(e){}
+  } else {
+    myColorSetting = (myColorSetting === "blue" ? "red" : "blue");
+    try{ localStorage.setItem("wr-mycolor", myColorSetting); }catch(e){}
+  }
+  render(false);
+};
+
+document.getElementById("racePosToggle").onclick = () => {
+  raceSideSetting = (raceSideSetting === "right" ? "left" : "right");
+  try{ localStorage.setItem("wr-raceside", raceSideSetting); }catch(e){}
+  state = initialState(); history = []; engineMove = null; selectedWall = null;
+  render(false); computeEngine();
+};
+
+document.getElementById("wallsToggle").onclick = () => {
+  raceWallsSetting = (raceWallsSetting === 15 ? 10 : 15);
+  try{ localStorage.setItem("wr-racewalls", raceWallsSetting); }catch(e){}
+  state = initialState(); history = []; engineMove = null; selectedWall = null;
+  render(false); computeEngine();
+};
+
+function selectWall(o){ selectedWall = (selectedWall === o ? null : o); render(true); }
+document.getElementById("wallH").onclick = () => selectWall("h");
+document.getElementById("wallV").onclick = () => selectWall("v");
+
+function isPointerInsideBoard(pnt){
+  const rect = document.getElementById("boardShell").getBoundingClientRect();
+  return pnt.x >= rect.left - 15 && pnt.x <= rect.right + 15 && pnt.y >= rect.top - 15 && pnt.y <= rect.bottom + 15;
+}
+
+function boardAnchorFromPointer(x, y){
+  const rect = document.getElementById("boardShell").getBoundingClientRect();
+  const rows = getBoardRows(), cols = getBoardCols();
+  const cellW = rect.width / cols, cellH = rect.height / rows;
+  let col = Math.round((x - rect.left) / cellW) - 1;
+  let row = Math.round((y - rect.top) / cellH) - 1;
+  col = Math.max(0, Math.min(cols - 2, col));
+  row = Math.max(0, Math.min(rows - 2, row));
+  return { r: row, c: col };
+}
+
+function dragPointer(x, y){ return { x: x, y: y - 65 }; }
+
+function updateGhost(x, y, o){
+  const pnt = dragPointer(x, y);
+  if(!isPointerInsideBoard(pnt)){
+    if(ghostEl){ ghostEl.remove(); ghostEl = null; }
+    return;
+  }
+  const a = boardAnchorFromPointer(pnt.x, pnt.y);
+  const colors = getPlayerColors();
+  const curCol = colors[state.turn];
+
+  if(!ghostEl){
+    ghostEl = createWallPiece(a.r, a.c, o, curCol, "ghost");
+    document.getElementById("wallLayer").appendChild(ghostEl);
+  }
+  const p = wallPosition(a.r, a.c, o);
+  ghostEl.style.left = p.x + "px";
+  ghostEl.style.top = p.y + "px";
+  ghostEl.className = `wall-piece ${o} color-${curCol} ghost`;
+
+  const ok = state.players[state.turn].walls > 0 && legalWall(a.r, a.c, o);
+  if(!ok) ghostEl.classList.add("bad");
+}
+
+function endDrag(x, y){
+  if(!dragging) return;
+  const pnt = dragPointer(x, y);
+  const inside = isPointerInsideBoard(pnt);
+  dragging = false;
+  if(ghostEl){ ghostEl.remove(); ghostEl = null; }
+  if(inside){
+    const a = boardAnchorFromPointer(pnt.x, pnt.y);
+    if(state.players[state.turn].walls > 0 && legalWall(a.r, a.c, dragOrient)){
+      placeWall(a.r, a.c, dragOrient);
+    }
+  }
+  dragOrient = null; selectedWall = null;
+  render(true);
+}
+
+function bindWallDrag(btn){
+  btn.addEventListener("pointerdown", e => {
+    if(state.gameOver || state.players[state.turn].walls <= 0) return;
+    dragging = true; dragOrient = btn.dataset.orient; selectedWall = dragOrient;
+    btn.setPointerCapture?.(e.pointerId);
+    updateGhost(e.clientX, e.clientY, dragOrient);
+    e.preventDefault(); e.stopPropagation();
+  });
+  btn.addEventListener("pointermove", e => { if(dragging) updateGhost(e.clientX, e.clientY, dragOrient); });
+  btn.addEventListener("pointerup", e => endDrag(e.clientX, e.clientY));
+  btn.addEventListener("pointercancel", () => endDrag(0, 0));
+}
+bindWallDrag(document.getElementById("wallH"));
+bindWallDrag(document.getElementById("wallV"));
+
+document.getElementById("boardShell").addEventListener("pointermove", e => {
+  if(dragging) updateGhost(e.clientX, e.clientY, dragOrient);
+});
+document.getElementById("boardShell").addEventListener("pointerup", e => {
+  if(dragging) endDrag(e.clientX, e.clientY);
+});
+document.getElementById("boardShell").addEventListener("click", e => {
+  if(dragging || !selectedWall) return;
+  const a = boardAnchorFromPointer(e.clientX, e.clientY);
+  if(legalWall(a.r, a.c, selectedWall)) placeWall(a.r, a.c, selectedWall);
+});
+
+function sfx(freq, dur, type="sine", vol=.035){
+  if(!soundOn) return;
+  try{
+    audio ||= new (window.AudioContext || window.webkitAudioContext)();
+    const o = audio.createOscillator(), g = audio.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, audio.currentTime);
+    g.gain.setValueAtTime(vol, audio.currentTime);
+    g.gain.exponentialRampToValueAtTime(.001, audio.currentTime + dur);
+    o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + dur);
+  }catch(e){}
+}
+function playMoveSound(){ sfx(430, .11, "sine", .035); setTimeout(() => sfx(650, .08, "sine", .025), 35); }
+function playWallSound(){ sfx(100, .07, "square", .03); }
+
+const modal = document.getElementById("modal");
+document.getElementById("settings").onclick = () => modal.classList.add("open");
+document.getElementById("close").onclick = () => modal.classList.remove("open");
+modal.onclick = e => { if(e.target === modal) modal.classList.remove("open"); };
+
+document.getElementById("soundSwitch").onclick = () => {
+  soundOn = !soundOn;
+  document.getElementById("soundSwitch").classList.toggle("on", soundOn);
+  try{ localStorage.setItem("wr-sound", soundOn ? "on" : "off"); }catch(e){}
+};
+function setTheme(t){
+  theme = t; document.body.classList.toggle("light", t === "light");
+  document.getElementById("darkBtn").classList.toggle("active", t === "dark");
+  document.getElementById("lightBtn").classList.toggle("active", t === "light");
+  try{ localStorage.setItem("wr-theme", t); }catch(e){}
+}
+document.getElementById("darkBtn").onclick = () => setTheme("dark");
+document.getElementById("lightBtn").onclick = () => setTheme("light");
+window.addEventListener("resize", () => render(false));
+
+try{
+  theme = localStorage.getItem("wr-theme") || "dark";
+  soundOn = localStorage.getItem("wr-sound") !== "off";
+  gameMode = localStorage.getItem("wr-gamemode") || "duel";
+  if(!["duel","race","quad"].includes(gameMode)) gameMode = "duel";
+  raceWallsSetting = parseInt(localStorage.getItem("wr-racewalls") || "15", 10);
+  raceSideSetting = localStorage.getItem("wr-raceside") || "right";
+  myColorSetting = localStorage.getItem("wr-mycolor") || "blue";
+  quadMyColorSetting = localStorage.getItem("wr-quadcolor") || "green";
+}catch(e){}
+setTheme(theme);
+document.getElementById("soundSwitch").classList.toggle("on", soundOn);
+document.getElementById("boardShell").className = "board-shell mode-" + gameMode;
+
+const nativeEngineWorker = new Worker("engine.worker.js");
+let nativeSearchId = 0;
+const searchPill = document.getElementById("engineSearchPill");
+const searchPillSub = document.getElementById("engineSearchSub");
+
+function showSearchPill(){
+  searchPill.classList.add("show");
+  const modeStr = gameMode === "quad" ? "4P 11×11" : (gameMode === "race" ? "9×13" : "9×9");
+  searchPillSub.textContent = `${activeEngineCoreName} · ${modeStr}`;
+}
+function hideSearchPill(){
+  searchPill.classList.remove("show");
+}
+
+function requestNativeEngine(){
+  if(state.gameOver || state.turn !== "me"){
+    hideSearchPill();
+    render(true);
+    return;
+  }
+  const id = ++nativeSearchId;
+  engineMove = null;
+  showSearchPill();
+  render(true);
+
+  nativeEngineWorker.postMessage({
+    type: "search",
+    id,
+    mode: gameMode,
+    rows: getBoardRows(),
+    cols: getBoardCols(),
+    players: state.players,
+    my: state.players.me,
+    opp: state.players.opp || state.players.top,
+    wallList: Array.from(state.walls.keys()),
+    timeMs: 1800,
+    maxDepth: 16
+  });
+}
+
+nativeEngineWorker.onmessage = (ev) => {
+  const d = ev.data || {};
+  if(d.type === "ready"){
+    activeEngineCoreName = (d.engine === "wasm" ? "WASM C++" : "JS Zero-GC");
+    if(state && state.turn === "me" && !state.gameOver) requestNativeEngine();
+    return;
+  }
+  if(d.type === "error"){
+    hideSearchPill();
+    console.error("Engine error:", d.message);
+    render(true);
+    return;
+  }
+  if(d.type !== "result" || d.id !== nativeSearchId) return;
+  hideSearchPill();
+
+  if (d.engine) {
+    activeEngineCoreName = (d.engine === "wasm" ? "WASM C++" : "JS Zero-GC");
+  }
+
+  if(!state.gameOver && state.turn === "me" && d.move){
+    const mType = (d.move.type === 0 || d.move.type === "step") ? "step" : "wall";
+    engineMove = { type: mType, r: d.move.r, c: d.move.c };
+    if(mType === "wall") engineMove.o = (d.move.o === 0 || d.move.o === "h") ? "h" : "v";
+  } else {
+    engineMove = null;
+  }
+  render(true);
+};
+
+function computeEngine(){
+  if(state.gameOver){ hideSearchPill(); render(true); return; }
+  if(state.turn === "me") requestNativeEngine();
+  else { engineMove = null; hideSearchPill(); render(true); }
+}
+
+state = initialState();
+render(false);
+computeEngine();
+</script>
+</body>
+  </html>
