@@ -1,4 +1,3 @@
-html
 <!doctype html>
 <html lang="ru">
 <head>
@@ -23,7 +22,7 @@ button{user-select:none}
   inset:0;
   z-index:999999;
   background:#0b111e;
-  display:flex;
+  display:none;
   flex-direction:column;
   align-items:center;
   justify-content:center;
@@ -225,7 +224,7 @@ button{user-select:none}
 }
 
 .modal{position:fixed;inset:0;z-index:100;background:#050a14dd;backdrop-filter:blur(12px);display:none;padding:16px}
-.modal.open{display:flex}.modal-card{width:min(100%,520px);margin:auto;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px;display:flex;flex-direction:column;box-shadow:0 20px 60px #0009}
+.modal.open{display:flex}.modal-card{width:min(100%,420px);margin:auto;background:var(--panel);border:1px solid var(--line);border-radius:20px;padding:18px;display:flex;flex-direction:column;box-shadow:0 20px 60px #0009}
 .modal-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}.modal-head h2{margin:0;font-size:18px}.close{width:34px;height:34px;border-radius:9px;background:var(--panel2);font-size:20px;cursor:pointer}
 .setting{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid var(--line)}.setting small{display:block;color:var(--muted);margin-top:2px;font-size:10.5px}
 .switch{width:46px;height:26px;border-radius:16px;background:#41516c;padding:2.5px;cursor:pointer}.switch i{display:block;width:21px;height:21px;background:#fff;border-radius:50%;transition:.18s}.switch.on{background:var(--mint)}.switch.on i{transform:translateX(20px)}
@@ -233,6 +232,12 @@ button{user-select:none}
 
 .author-box{margin-top:14px;text-align:center;font-size:12.5px;font-weight:800;color:#9eb1d1}
 .author-box a{color:#52a5ff;text-decoration:none}
+
+.dialog-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:16px}
+.dialog-btn{height:38px;border-radius:10px;font-weight:900;font-size:12.5px;cursor:pointer}
+.dialog-btn.primary{background:linear-gradient(135deg,#3c86ff,#285bc6);color:#fff}
+.dialog-btn.danger{background:#c93b4b;color:#fff}
+.dialog-btn.secondary{background:var(--panel2);color:var(--text)}
 
 .light{--board:#eef1f7;--boardLine:#b8c0d0;--bg:#edf1f8;--panel:#fff;--panel2:#edf1f7;--text:#1c2940;--muted:#78869e;--line:#d5ddea}
 .light .cell{border-right-color:#c4cddc;border-bottom-color:#c4cddc}
@@ -248,14 +253,14 @@ button{user-select:none}
 </style>
 </head>
 <body>
-<div id="engineSearchPill"><span class="dot"></span><span>ИЩЕМ ХОД</span><span class="sub" id="engineSearchSub">C++ WASM...</span></div>
+<div id="engineSearchPill"><span class="dot"></span><span>ИЩЕМ ХОД</span><span class="sub" id="engineSearchSub">Stockfish Core</span></div>
 
 <div id="appBlocker">
   <div class="blocker-card">
     <div style="font-size:48px;margin-bottom:8px;">🔒</div>
     <h2 style="font-size:19px;font-weight:950;margin-bottom:6px;">Доступ ограничен</h2>
     <p style="color:#8b9ab3;font-size:12.5px;line-height:1.45;margin-bottom:14px;">
-      Откройте чит через бота или вставьте ключ доступа (он намертво привяжется к этому устройству):
+      Откройте чит через бота или вставьте ключ доступа (он привяжется к этому устройству навсегда):
     </p>
     <div class="token-box">
       <input type="text" id="manualTokenInput" class="token-input" placeholder="Вставьте ключ из бота...">
@@ -275,13 +280,13 @@ button{user-select:none}
       <div class="brand-name">WALLHACK PRO</div>
     </div>
     <div class="top-actions">
-      <button class="skip-btn" id="skipTurnBtn" title="Пропустить ход текущего игрока">⏭ Пропуск</button>
+      <button class="skip-btn" id="skipTurnBtn" title="Пропустить ход">⏭ Пропуск</button>
       <button class="resign-btn" id="resign" title="Сбросить партию">↻ Сброс</button>
     </div>
   </header>
 
   <div class="control-bar">
-    <button class="ctrl-btn" id="modeToggle" title="Сменить режим">
+    <button class="ctrl-btn" id="modeToggle" title="Сменить режим (Дуэль -> Гонка -> 4 игрока)">
       <span id="modeLabel">Дуэль 9×9</span>
     </button>
     <button class="ctrl-btn" id="firstTurnToggle" title="Кто делает 1-й ход">
@@ -292,11 +297,11 @@ button{user-select:none}
       <span>Ты:</span>
       <span class="turn-badge blue" id="colorBadge">Синий</span>
     </button>
-    <button class="ctrl-btn" id="racePosToggle" style="display:none" title="Твоя стартовая позиция в гонке">
+    <button class="ctrl-btn" id="racePosToggle" style="display:none">
       <span>Старт:</span>
       <span id="racePosBadge">Справа</span>
     </button>
-    <button class="ctrl-btn" id="wallsToggle" style="display:none" title="Количество стен">
+    <button class="ctrl-btn" id="wallsToggle" style="display:none">
       <span>Стен:</span>
       <span id="wallsBadge">15</span>
     </button>
@@ -334,26 +339,39 @@ button{user-select:none}
     
     <section class="dock">
       <div class="dock-count"><span>🧱</span><span id="dockCount">10</span></div>
-      <button class="wall-tool" data-orient="h" id="wallH" aria-label="Горизонтальная стена"><i class="wall-icon"></i></button>
-      <button class="wall-tool" data-orient="v" id="wallV" aria-label="Вертикальная стена"><i class="wall-icon"></i></button>
+      <button class="wall-tool" data-orient="h" id="wallH"><i class="wall-icon"></i></button>
+      <button class="wall-tool" data-orient="v" id="wallV"><i class="wall-icon"></i></button>
     </section>
     
     <button class="settings" id="settings"><span>⚙</span> Настройки</button>
   </div>
 </div>
 
+<!-- Модалка настроек -->
 <div class="modal" id="modal">
   <div class="modal-card">
     <div class="modal-head"><h2>Настройки</h2><button class="close" id="close">×</button></div>
     <div class="setting">
-      <div><b>Тема</b><small>Оформление движка</small></div>
+      <div><b>Тема</b><small>Оформление интерфейса</small></div>
       <div class="theme"><button id="darkBtn">Тёмная</button><button id="lightBtn">Светлая</button></div>
     </div>
     <div class="setting">
-      <div><b>Звуковые эффекты</b><small>Ход и установка стены</small></div>
+      <div><b>Звуковые эффекты</b><small>Отклик при ходе и стене</small></div>
       <button class="switch on" id="soundSwitch"><i></i></button>
     </div>
-    <div class="author-box">канал: <a href="https://t.me/WallRushHack" target="_blank" rel="noopener">@WallRushHack</a></div>
+    <div class="author-box">канал: <a href="https://t.me/WallRushHack" target="_blank">@WallRushHack</a></div>
+  </div>
+</div>
+
+<!-- Кастомная модалка сброса и окончания партии (вместо браузерных alert/confirm) -->
+<div class="modal" id="dialogModal">
+  <div class="modal-card" style="text-align:center;">
+    <h2 id="dialogTitle" style="font-size:18px;font-weight:950;margin-bottom:8px;">Сбросить партию?</h2>
+    <p id="dialogText" style="color:var(--muted);font-size:13px;line-height:1.45;">Текущее расположение фишек и стен будет очищено.</p>
+    <div class="dialog-actions" id="dialogActions">
+      <button class="dialog-btn secondary" id="dialogCancel">Отмена</button>
+      <button class="dialog-btn danger" id="dialogConfirm">Сбросить</button>
+    </div>
   </div>
 </div>
 
@@ -370,14 +388,15 @@ if(tg){
 
 // ============================================================
 // 5-УРОВНЕВАЯ ВЕЧНАЯ ПРИВЯЗКА ПОДПИСКИ К УСТРОЙСТВУ
-// (IndexedDB + CacheStorage + LocalStorage + 10Y Cookie + CloudStorage)
+// (IndexedDB + CacheStorage + LocalStorage + 10-Year Cookies + TG CloudStorage)
 // ============================================================
 const SECRET = "wallrush_ultra_secret_key_2026";
+const CACHE_NAME = "wallhack_perm_auth_v1";
 
 function idbOpen() {
   return new Promise((res) => {
     try {
-      const req = indexedDB.open("wallhack_vault_v2", 1);
+      const req = indexedDB.open("wallhack_vault_v4", 1);
       req.onupgradeneeded = () => req.result.createObjectStore("auth");
       req.onsuccess = () => res(req.result);
       req.onerror = () => res(null);
@@ -405,32 +424,28 @@ async function idbSet(k, v) {
   } catch(e) {}
 }
 
-async function cacheStorageSet(tokenStr) {
+async function cacheSetToken(tokenStr) {
   try {
     if ("caches" in window) {
-      const cache = await caches.open("wallhack_permanent_auth");
-      await cache.put("/__auth_token__", new Response(tokenStr));
+      const c = await caches.open(CACHE_NAME);
+      await c.put("/__sub_token__", new Response(tokenStr));
     }
-  } catch(e) {}
+  } catch(e){}
 }
-
-async function cacheStorageGet() {
+async function cacheGetToken() {
   try {
     if ("caches" in window) {
-      const cache = await caches.open("wallhack_permanent_auth");
-      const resp = await cache.match("/__auth_token__");
+      const c = await caches.open(CACHE_NAME);
+      const resp = await c.match("/__sub_token__");
       if (resp) return await resp.text();
     }
-  } catch(e) {}
+  } catch(e){}
   return null;
 }
 
 async function checkSign(testUid, testExp, testSign) {
   if (!testUid || !testExp || !testSign) return false;
   if (testExp <= Math.floor(Date.now() / 1000)) return false;
-  const tgUid = tg?.initDataUnsafe?.user?.id;
-  if (tgUid && String(testUid) !== String(tgUid)) return false;
-
   try {
     const encoder = new TextEncoder();
     const key = await crypto.subtle.importKey(
@@ -456,16 +471,15 @@ async function checkSign(testUid, testExp, testSign) {
 
 async function savePermanentToken(tokenStr) {
   try { localStorage.setItem("sub_token", tokenStr); } catch(e){}
-  try { sessionStorage.setItem("sub_token", tokenStr); } catch(e){}
   await idbSet("sub_token", tokenStr);
-  await cacheStorageSet(tokenStr);
+  await cacheSetToken(tokenStr);
   try { document.cookie = `sub_token=${encodeURIComponent(tokenStr)}; max-age=315360000; path=/; SameSite=Lax`; } catch(e){}
   try { tg?.CloudStorage?.setItem("sub_token", tokenStr); } catch(e){}
 }
 
 function unlockApp() {
   const blocker = document.getElementById("appBlocker");
-  if (blocker) blocker.remove();
+  if (blocker) blocker.style.display = "none";
 }
 
 async function tryTokenString(rawStr) {
@@ -507,7 +521,7 @@ async function verifyAccessSystem() {
   const idbToken = await idbGet("sub_token");
   if (idbToken && await tryTokenString(idbToken)) return;
 
-  const cacheToken = await cacheStorageGet();
+  const cacheToken = await cacheGetToken();
   if (cacheToken && await tryTokenString(cacheToken)) return;
 
   try {
@@ -517,21 +531,70 @@ async function verifyAccessSystem() {
 
   if (tg?.CloudStorage) {
     tg.CloudStorage.getItem("sub_token", async (err, val) => {
-      if (!err && val) await tryTokenString(val);
+      if (!err && val && await tryTokenString(val)) return;
+      document.getElementById("appBlocker").style.display = "flex";
     });
+  } else {
+    document.getElementById("appBlocker").style.display = "flex";
   }
 }
 
 document.getElementById("manualTokenBtn").onclick = async () => {
   const val = document.getElementById("manualTokenInput").value;
   const ok = await tryTokenString(val);
-  if (!ok) {
+  if (ok) {
+    unlockApp();
+  } else {
     document.getElementById("tokenError").style.display = "block";
   }
 };
 
 verifyAccessSystem();
 
+// ============================================================
+// КАСТОМНЫЕ МОДАЛКИ (БЕЗ NATIVE ALERT / CONFIRM)
+// ============================================================
+const dialogModal = document.getElementById("dialogModal");
+const dialogTitle = document.getElementById("dialogTitle");
+const dialogText = document.getElementById("dialogText");
+const dialogCancel = document.getElementById("dialogCancel");
+const dialogConfirm = document.getElementById("dialogConfirm");
+
+function showConfirmDialog(title, text, confirmLabel, onConfirm) {
+  dialogTitle.textContent = title;
+  dialogText.textContent = text;
+  dialogCancel.style.display = "block";
+  dialogConfirm.textContent = confirmLabel;
+  dialogConfirm.className = "dialog-btn danger";
+  dialogModal.classList.add("open");
+  dialogCancel.onclick = () => dialogModal.classList.remove("open");
+  dialogConfirm.onclick = () => {
+    dialogModal.classList.remove("open");
+    onConfirm();
+  };
+}
+
+function showNoticeDialog(title, text) {
+  dialogTitle.textContent = title;
+  dialogText.textContent = text;
+  dialogCancel.style.display = "none";
+  dialogConfirm.textContent = "Новая партия";
+  dialogConfirm.className = "dialog-btn primary";
+  dialogModal.classList.add("open");
+  dialogConfirm.onclick = () => {
+    dialogModal.classList.remove("open");
+    state = initialState();
+    history = [];
+    engineMove = null;
+    selectedWall = null;
+    render(false);
+    computeEngine();
+  };
+}
+
+// ============================================================
+// ИГРОВАЯ ЛОГИКА И 3 РЕЖИМА (DUEL 9x9, RACE 9x13, QUAD 11x11)
+// ============================================================
 const dirs = [[-1,0],[1,0],[0,-1],[0,1]];
 const QUAD_ORDER = ["me", "left", "top", "right"];
 const QUAD_COLOR_CYCLE = ["green", "blue", "red", "yellow"];
@@ -539,7 +602,7 @@ const COLOR_NAMES = { blue: "Синий", red: "Красный", green: "Зел�
 const SEAT_NAMES = { me: "Ты", left: "Слева", top: "Сверху", right: "Справа", opp: "Противник" };
 
 let state, history = [], engineMove = null, selectedWall = null, soundOn = true, theme = "dark";
-let gameMode = "duel";
+let gameMode = "duel"; // "duel" | "race" | "quad"
 let firstTurnSetting = "me";
 let myColorSetting = "blue";
 let quadMyColorSetting = "green";
@@ -1038,7 +1101,10 @@ function finishTurn(){
     state.gameOver = true;
     hideSearchPill();
     render(true);
-    setTimeout(() => alert(curKey === "me" ? "🏆 Ты победил!" : `Победил игрок: ${SEAT_NAMES[curKey]}!`), 20);
+    showNoticeDialog(
+      curKey === "me" ? "🏆 Победа!" : "Партия завершена",
+      curKey === "me" ? "Ты первым достиг финиша!" : `Победил игрок: ${SEAT_NAMES[curKey]}`
+    );
     return;
   }
   state.turn = nextActiveTurn(curKey);
@@ -1074,10 +1140,19 @@ document.getElementById("skipTurnBtn").onclick = () => {
 };
 
 document.getElementById("resign").onclick = () => {
-  if(confirm("Сбросить партию и начать заново?")){
-    state = initialState(); history = []; engineMove = null; selectedWall = null;
-    render(false); computeEngine();
-  }
+  showConfirmDialog(
+    "Сбросить партию?",
+    "Все ходы и стены будут очищены, игра начнется с начальной позиции.",
+    "Сбросить",
+    () => {
+      state = initialState();
+      history = [];
+      engineMove = null;
+      selectedWall = null;
+      render(false);
+      computeEngine();
+    }
+  );
 };
 
 document.getElementById("modeToggle").onclick = () => {
@@ -1347,4 +1422,4 @@ render(false);
 computeEngine();
 </script>
 </body>
-</html>
+  </html>
