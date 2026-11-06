@@ -1,0 +1,38 @@
+name: Build C++ WASM Engine
+​on:
+push:
+paths:
+- 'engine.cpp'
+- '.github/workflows/build-wasm.yml'
+workflow_dispatch:
+​permissions:
+contents: write
+​jobs:
+build:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout repository
+uses: actions/checkout@v4
+​- name: Setup Emscripten SDK
+uses: mymindstorm/setup-emsdk@v14
+with:
+version: 3.1.56
+​- name: Compile C++ Engine to WebAssembly
+run: |
+emcc -O3 engine.cpp -o engine.js 
+-s WASM=1 
+-s MODULARIZE=1 
+-s EXPORT_NAME="createModule" 
+-s EXPORTED_FUNCTIONS="['_initEngine', '_search', '_getNodesSearched', '_getCompletedDepth', '_malloc', '_free']" 
+-s EXPORTED_RUNTIME_METHODS="['ccall', 'cwrap']" 
+-s ALLOW_MEMORY_GROWTH=1 
+-s INITIAL_MEMORY=67108864 
+-s ENVIRONMENT='worker' 
+-std=c++17
+​- name: Commit and Push WASM Artifacts
+run: |
+git config --global user.name "github-actions[bot]"
+git config --global user.email "github-actions[bot]@users.noreply.github.com"
+git add engine.wasm engine.js
+git diff-index --quiet HEAD || git commit -m "Auto-build C++ Stockfish WASM Engine"
+git push
