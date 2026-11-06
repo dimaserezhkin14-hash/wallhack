@@ -112,6 +112,7 @@ const exitsMe = new Uint8Array(169);
 const distOpp = new Int8Array(169);
 const waysOpp = new Int16Array(169);
 const exitsOpp = new Uint8Array(169);
+const distCenter11 = new Int8Array(121);
 
 const killer = Array.from({ length: 64 }, () => [0, 0]);
 const counterMoves = [new Uint16Array(2048), new Uint16Array(2048)];
@@ -673,6 +674,100 @@ function searchBestMoveJS(timeBudgetMs, maxSearchDepth) {
   return unpackMove(bestCode);
 }
 
+// ============================================================================
+// QUAD 4-PLAYER JS FALLBACK (11x11 — CENTER 5,5)
+// ============================================================================
+let quadPlayers = [];
+
+function computeCenterMap11() {
+  distCenter11.fill(-1);
+  let head = 0, tail = 0;
+  const centerIdx = 5 * 11 + 5;
+  distCenter11[centerIdx] = 0;
+  bfsQ[tail++] = centerIdx;
+
+  while (head < tail) {
+    const idx = bfsQ[head++];
+    const r = (idx / 11) | 0;
+    const c = idx - r * 11;
+    const nd = distCenter11[idx] + 1;
+
+    if (canUp(r, c)) {
+      const ni = idx - 11;
+      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canDown(r, c)) {
+      const ni = idx + 11;
+      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canLeft(r, c)) {
+      const ni = idx - 1;
+      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
+    }
+    if (canRight(r, c)) {
+      const ni = idx + 1;
+      if (distCenter11[ni] === -1) { distCenter11[ni] = nd; bfsQ[tail++] = ni; }
+    }
+  }
+  return distCenter11;
+}
+
+function isCellOccupiedQuad(r, c, ignoreIdx) {
+  for (let i = 0; i < quadPlayers.length; i++) {
+    if (i !== ignoreIdx && quadPlayers[i].active && quadPlayers[i].r === r && quadPlayers[i].c === c) return true;
+  }
+  return false;
+}
+
+function getQuadSteps(pIdx) {
+  const p = quadPlayers[pIdx];
+  const out = [];
+  for (let d = 0; d < 4; d++) {
+    if (!canStepDir(p.r, p.c, d)) continue;
+    const nr = p.r + DR[d], nc = p.c + DC[d];
+    if (isCellOccupiedQuad(nr, nc, pIdx)) {
+      const jr = nr + DR[d], jc = nc + DC[d];
+      if (jr >= 0 && jr < 11 && jc >= 0 && jc < 11 && canStepDir(nr, nc, d) && !isCellOccupiedQuad(jr, jc, pIdx)) {
+        out.push({ r: jr, c: jc });
+      } else {
+        if (d < 2) {
+          if (canLeft(nr, nc) && !isCellOccupiedQuad(nr, nc - 1, pIdx)) out.push({ r: nr, c: nc - 1 });
+          if (canRight(nr, nc) && !isCellOccupiedQuad(nr, nc + 1, pIdx)) out.push({ r: nr, c: nc + 1 });
+        } else {
+          if (canUp(nr, nc) && !isCellOccupiedQuad(nr - 1, nc, pIdx)) out.push({ r: nr - 1, c: nc });
+          if (canDown(nr, nc) && !isCellOccupiedQuad(nr + 1, nc, pIdx)) out.push({ r: nr + 1, c: nc });
+        }
+      }
+    } else {
+      out.push({ r: nr, c: nc });
+    }
+  }
+  return out;
+}
+
+function searchBestQuadMoveJS(timeBudgetMs) {
+  nodes = 0; completedDepth = 1;
+  const dist = computeCenterMap11();
+  const me = quadPlayers[0];
+  const curD = dist[me.r * 11 + me.c];
+  const steps = getQuadSteps(0);
+
+  let bestMove = null;
+  let bestPrio = -1e9;
+
+  for (let i = 0; i < steps.length; i++) {
+    const st = steps[i];
+    if (st.r === 5 && st.c === 5) return { type: 0, r: 5, c: 5, o: 0 };
+    const nd = dist[st.r * 11 + st.c];
+    const prio = (curD - nd) * 15000;
+    if (prio > bestPrio) {
+      bestPrio = prio;
+      bestMove = { type: 0, r: st.r, c: st.c, o: 0 };
+    }
+  }
+  return bestMove;
+}
+
 function loadBoardWalls(m) {
   hWalls.fill(0);
   vWalls.fill(0);
@@ -737,9 +832,19 @@ self.onmessage = function (e) {
 
     if (!bestMove) {
       loadBoardWalls(m);
-      myR = m.my.r; myC = m.my.c; myWalls = m.my.walls;
-      oppR = m.opp.r; oppC = m.opp.c; oppWalls = m.opp.walls;
-      bestMove = searchBestMoveJS(budget, maxD);
+      if (isQuadMode && m.players) {
+        quadPlayers = [
+          { ...m.players.me },
+          { ...m.players.left },
+          { ...m.players.top },
+          { ...m.players.right }
+        ];
+        bestMove = searchBestQuadMoveJS(budget);
+      } else {
+        myR = m.my.r; myC = m.my.c; myWalls = m.my.walls;
+        oppR = m.opp.r; oppC = m.opp.c; oppWalls = m.opp.walls;
+        bestMove = searchBestMoveJS(budget, maxD);
+      }
       usedEngine = "js";
     }
 
